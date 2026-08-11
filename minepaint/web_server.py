@@ -18,6 +18,7 @@ import hmac
 import json
 import logging
 import os
+import random
 import re
 import secrets as _secrets
 import shutil
@@ -265,6 +266,26 @@ async def run_llm_plan(prompt: str) -> Dict[str, Any]:
             "entities": len(world.entities),
         },
     }
+
+
+@app.post("/api/random_landscape")
+async def random_landscape(request: Request) -> Dict[str, Any]:
+    """Replace the world with a randomly generated landscape (random seed + varied params)."""
+    require_auth(request)
+    seed = _secrets.randbits(31)
+    rng = random.Random(seed)
+    sea_level = rng.randint(10, 14)
+    snowline = rng.randint(24, 30)
+    mountain_amp = round(rng.uniform(30.0, 48.0), 1)
+    summary = await execute_tool_call("generate_terrain", {
+        "seed": seed,
+        "sea_level": sea_level,
+        "snowline": snowline,
+        "mountain_amp": mountain_amp,
+        "river": True,
+    })
+    ok = not (isinstance(summary, dict) and "error" in summary)
+    return {"ok": ok, "summary": summary}
 
 
 @app.post("/api/prompt")

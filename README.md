@@ -63,9 +63,14 @@ Palette is fixed (18 block types) — the LLM cannot invent block types.
 
 ## Viewer
 
+- **Day/night cycle** — the sun rises in the east (+x), arcs overhead, sets in
+  the west (−x); the moon follows the same axis opposite phase. Time slider
+  (0–24h), auto-cycle button (▶ Cycle, one full day per 5 min), starfield at
+  night, dynamic sky/lighting by sun elevation. URL params: `?time=18`, `?cycle=1`
 - Orbit camera + presets (Isometric / Top / Front / Side) + cinematic URL
-  params: `?camx=&camy=&camz=&tgtx=&tgty=&tgtz=`
-- **Sunset / Day** lighting toggle; sunset = warm sun + purple→orange sky + haze
+  params: `?camx=&camy=&camz=&tgtx=&tgty=&tgtz=` and `?ui=0` (hide HUD)
+- **🎲 Random** button — generates a fresh random landscape (random seed +
+  varied sea_level/snowline/mountain_amp via `POST /api/random_landscape`)
 - Layer visibility toggles, palette legend, per-block color jitter (pseudo-texture)
 - **Export JPG**: supersampled render of the current camera angle
 - **Prompt box**: LLM paints your scene (opencode CLI backend)

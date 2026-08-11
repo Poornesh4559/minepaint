@@ -54,13 +54,18 @@
   #topbar .title { font-family: var(--pixel); font-size: 12px; color: #fff; letter-spacing: 1px; }
   #topbar .title span { color: var(--accent); }
   .btn-group { display: flex; gap: 6px; }
-  button.cam, button.light {
+  button.cam {
     font-family: var(--mono); font-size: 10px; color: var(--text); background: #22222e;
     border: 1px solid var(--panel-border); border-radius: 5px; padding: 5px 9px; cursor: pointer;
     transition: all 120ms ease;
   }
-  button.cam:hover, button.light:hover { border-color: var(--accent); color: #fff; }
-  button.cam.active, button.light.active { background: var(--accent); border-color: var(--accent); color: #101018; font-weight: 600; }
+  button.cam:hover { border-color: var(--accent); color: #fff; }
+  button.cam.active { background: var(--accent); border-color: var(--accent); color: #101018; font-weight: 600; }
+  button.cam:disabled { opacity: 0.5; cursor: wait; }
+
+  #time-bar { top: 60px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; padding: 6px 14px; font-size: 11px; color: var(--dim); }
+  #time-bar input[type=range] { width: 170px; accent-color: var(--accent); cursor: pointer; }
+  #time-label { font-family: var(--mono); min-width: 42px; color: var(--text); text-align: center; }
 
   #bottom-bar { bottom: 14px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 14px; padding: 8px 16px; }
   button.export {
@@ -141,11 +146,15 @@
       <button class="cam" data-cam="top">Top</button>
       <button class="cam" data-cam="front">Front</button>
       <button class="cam" data-cam="side">Side</button>
+      <button class="cam" id="rand-btn" title="Generate a random landscape">🎲 Random</button>
     </div>
-    <div class="btn-group" id="light-group">
-      <button class="light active" data-light="sunset">Sunset</button>
-      <button class="light" data-light="day">Day</button>
-    </div>
+  </div>
+
+  <div id="time-bar" class="hud">
+    <span>🌞</span>
+    <input type="range" id="time-slider" min="0" max="24" step="0.25" value="18">
+    <span id="time-label">18:00</span>
+    <button class="cam" id="cycle-btn">▶ Cycle</button>
   </div>
 
   <div id="legend" class="hud">
@@ -279,31 +288,61 @@ function setWorldMeta(size, yMin) {
   worldMeta.center.set((w - 1) / 2, (y0 + y0 + h - 1) / 2, (d - 1) / 2);
 }
 
-// ---------- sky / lighting ----------
-function makeSkyTexture(light) {
-  const c = document.createElement('canvas');
-  c.width = 2; c.height = 512;
-  const ctx = c.getContext('2d');
-  const g = ctx.createLinearGradient(0, 0, 0, 512);
-  if (light === 'sunset') {
-    g.addColorStop(0.00, '#14092e');
-    g.addColorStop(0.35, '#3d1a4e');
-    g.addColorStop(0.62, '#8a3450');
-    g.addColorStop(0.82, '#e0693f');
-    g.addColorStop(1.00, '#ffb36b');
-  } else {
-    g.addColorStop(0.00, '#2c4a7c');
-    g.addColorStop(0.45, '#6d9ad1');
-    g.addColorStop(0.75, '#a8c8ea');
-    g.addColorStop(1.00, '#dbe9f7');
+// ---------- day / night cycle ----------
+// Celestial axis: the sun rises in the EAST (+x), arcs overhead (y up), sets
+// in the WEST (-x); the moon follows the same axis, opposite phase.
+// timeOfDay in hours: 0 = midnight, 6 = sunrise, 12 = noon, 18 = sunset.
+function celestialAngle(hours) {
+  return ((hours - 6) / 24) * Math.PI * 2;
+}
+const _celVec = new THREE.Vector3();
+function celestialPos(hours) {
+  const a = celestialAngle(hours);
+  return _celVec.set(Math.cos(a), Math.sin(a), 0).multiplyScalar(700);
+}
+
+const SKY_KEYS = [
+  { h: 0,  top: '#05070f', mid: '#0b1226', hor: '#182036' },
+  { h: 6,  top: '#2a2350', mid: '#b05a4a', hor: '#ffb36b' },
+  { h: 12, top: '#2c4a7c', mid: '#6d9ad1', hor: '#cfe2f5' },
+  { h: 18, top: '#14092e', mid: '#8a3450', hor: '#ffb36b' },
+  { h: 24, top: '#05070f', mid: '#0b1226', hor: '#182036' },
+];
+const _skyTop = new THREE.Color(), _skyMid = new THREE.Color(), _skyHor = new THREE.Color();
+const _tmp = new THREE.Color();
+function computeSky(hours) {
+  let a = SKY_KEYS[0], b = SKY_KEYS[SKY_KEYS.length - 1];
+  for (let i = 0; i < SKY_KEYS.length - 1; i++) {
+    if (hours >= SKY_KEYS[i].h && hours <= SKY_KEYS[i + 1].h) { a = SKY_KEYS[i]; b = SKY_KEYS[i + 1]; break; }
   }
+  const span = (b.h - a.h) || 1;
+  const t = THREE.MathUtils.smoothstep((hours - a.h) / span, 0, 1);
+  _skyTop.set(a.top).lerp(_tmp.set(b.top), t);
+  _skyMid.set(a.mid).lerp(_tmp.set(b.mid), t);
+  _skyHor.set(a.hor).lerp(_tmp.set(b.hor), t);
+}
+
+const skyCanvas = document.createElement('canvas');
+skyCanvas.width = 2; skyCanvas.height = 512;
+const skyTex = new THREE.CanvasTexture(skyCanvas);
+skyTex.colorSpace = THREE.SRGBColorSpace;
+let skyLastMinute = -1;
+function updateSkyTexture(hours) {
+  const minute = Math.floor(hours * 6);   // rebuild ~every 10 in-game minutes
+  if (minute === skyLastMinute) return;
+  skyLastMinute = minute;
+  computeSky(hours);
+  const ctx = skyCanvas.getContext('2d');
+  const g = ctx.createLinearGradient(0, 0, 0, 512);
+  g.addColorStop(0.00, '#' + _skyTop.getHexString());
+  g.addColorStop(0.45, '#' + _skyMid.getHexString());
+  g.addColorStop(0.80, '#' + _skyHor.getHexString());
+  g.addColorStop(1.00, '#' + _skyHor.getHexString());
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, 2, 512);
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
+  skyTex.needsUpdate = true;
 }
-let skyTex = makeSkyTexture('sunset');
+
 let sky = new THREE.Mesh(
   new THREE.SphereGeometry(900, 24, 12),
   new THREE.MeshBasicMaterial({ map: skyTex, side: THREE.BackSide, fog: false, depthWrite: false })
@@ -311,48 +350,138 @@ let sky = new THREE.Mesh(
 sky.renderOrder = -10;
 scene.add(sky);
 
-const ambient = new THREE.AmbientLight(0x8a93b8, 0.55);
-const sun = new THREE.DirectionalLight(0xffffff, 1.15);
-const hemi = new THREE.HemisphereLight(0xbcd0ff, 0x20202a, 0.35);
-scene.add(ambient); scene.add(sun); scene.add(hemi);
+// starfield, fades in at night
+const starGeo = new THREE.BufferGeometry();
+{
+  const N = 1400, arr = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    const v = new THREE.Vector3().randomDirection().multiplyScalar(880);
+    arr[i * 3] = v.x; arr[i * 3 + 1] = v.y; arr[i * 3 + 2] = v.z;
+  }
+  starGeo.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+}
+const stars = new THREE.Points(starGeo, new THREE.PointsMaterial({
+  color: 0xcfd8ff, size: 1.6, sizeAttenuation: false, fog: false, transparent: true, opacity: 0,
+}));
+stars.renderOrder = -9;
+scene.add(stars);
 
-// visible sun disc
+const ambient = new THREE.AmbientLight(0x8a93b8, 0.7);
+const sun = new THREE.DirectionalLight(0xffa04d, 2.6);
+const hemi = new THREE.HemisphereLight(0xbcd0ff, 0x20202a, 0.5);
+scene.add(ambient); scene.add(sun); scene.add(hemi);
+sun.target.position.copy(worldMeta.center);
+
+// visible sun + moon discs
 const sunDisc = new THREE.Mesh(
   new THREE.SphereGeometry(26, 16, 16),
   new THREE.MeshBasicMaterial({ color: 0xffd9a0, fog: false })
 );
 scene.add(sunDisc);
+const moonDisc = new THREE.Mesh(
+  new THREE.SphereGeometry(17, 16, 16),
+  new THREE.MeshBasicMaterial({ color: 0xdde6ff, fog: false })
+);
+scene.add(moonDisc);
 
-let currentLight = 'sunset';
-function applyLight(light) {
-  currentLight = light;
-  scene.background = null; // gradient sky sphere provides the backdrop
-  scene.fog = new THREE.FogExp2(light === 'sunset' ? 0xe08a5f : 0x9fb4d8, light === 'sunset' ? 0.003 : 0.0035);
-  if (light === 'sunset') {
-    ambient.color.set(0x6a4a8a); ambient.intensity = 1.05;
-    sun.color.set(0xffa04d); sun.intensity = 2.6;
-    hemi.color.set(0xffb07a); hemi.groundColor.set(0x2a1438); hemi.intensity = 1.0;
-    // sun behind/right of a north-looking camera -> lights the faces we see
-    sun.position.set(0.38, 0.25, 0.85).normalize().multiplyScalar(700);
-    sunDisc.material.color.set(0xffd9a0);
-    sunDisc.position.copy(sun.position);
-  } else {
-    ambient.color.set(0x8a93b8); ambient.intensity = 0.7;
-    sun.color.set(0xffffff); sun.intensity = 1.4;
-    hemi.color.set(0xbcd0ff); hemi.groundColor.set(0x20202a); hemi.intensity = 0.5;
-    sun.position.set(0.5, 1, 0.35).normalize().multiplyScalar(700);
-    sunDisc.position.copy(sun.position);
-  }
+const _c1 = new THREE.Color(), _c2 = new THREE.Color();
+function applyTimeOfDay(hours) {
+  const el = Math.sin(celestialAngle(hours));          // sun elevation -1..1
+  const sunPosV = celestialPos(hours);
+  sun.position.copy(sunPosV);
+  sunDisc.position.copy(sunPosV);
+  sunDisc.visible = el > -0.04;
+
+  const moonPosV = celestialPos((hours + 12) % 24);    // moon: opposite phase
+  moonDisc.position.copy(moonPosV);
+  moonDisc.visible = -el > -0.04;
+
+  const warm = THREE.MathUtils.clamp(1 - Math.max(0, el) * 1.4, 0.25, 1);
+  sun.color.copy(_c1.set('#ff8c42').lerp(_c2.set('#fff3e0'), 1 - warm));
+  sun.intensity = THREE.MathUtils.clamp(el * 3.4, 0, 2.9);
   sun.target.position.copy(worldMeta.center);
   sun.target.updateMatrixWorld();
-}
-applyLight(new URLSearchParams(location.search).get('light') === 'day' ? 'day' : 'sunset');
 
-document.querySelectorAll('.light').forEach(btn =>
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.light').forEach(b => b.classList.toggle('active', b === btn));
-    applyLight(btn.dataset.light);
-  }));
+  const night = THREE.MathUtils.clamp(1 - Math.max(0, el) / 0.3, 0, 1);   // 0 day, 1 night
+  stars.material.opacity = night * 0.9;
+
+  ambient.color.copy(_c1.set('#8a93b8').lerp(_c2.set('#1c2a4a'), night));
+  ambient.intensity = 0.35 + (1 - night) * 0.5;
+  hemi.color.copy(_c1.set('#bcd0ff').lerp(_c2.set('#31407a'), night));
+  hemi.groundColor.copy(_c1.set('#20202a').lerp(_c2.set('#05070f'), night));
+  hemi.intensity = 0.25 + (1 - night) * 0.45;
+
+  computeSky(hours);
+  if (scene.fog) scene.fog.color.copy(_skyHor);
+  else scene.fog = new THREE.FogExp2(_skyHor, 0.003);
+  scene.fog.density = 0.0025 + (1 - night) * 0.0008;
+  updateSkyTexture(hours);
+}
+
+// time state + UI
+let timeOfDay = 18;
+let autoCycle = false;
+const CYCLE_HOURS_PER_SEC = 24 / 300;    // one full day every 5 minutes
+
+const timeSlider = document.getElementById('time-slider');
+const timeLabel = document.getElementById('time-label');
+const cycleBtn = document.getElementById('cycle-btn');
+function fmtTime(h) {
+  const hh = Math.floor(h) % 24;
+  const mm = String(Math.floor((h % 1) * 60)).padStart(2, '0');
+  return String(hh).padStart(2, '0') + ':' + mm;
+}
+timeSlider.addEventListener('input', () => {
+  autoCycle = false;
+  cycleBtn.textContent = '▶ Cycle';
+  timeOfDay = parseFloat(timeSlider.value);
+  timeLabel.textContent = fmtTime(timeOfDay);
+  applyTimeOfDay(timeOfDay);
+});
+cycleBtn.addEventListener('click', () => {
+  autoCycle = !autoCycle;
+  cycleBtn.textContent = autoCycle ? '⏸ Pause' : '▶ Cycle';
+});
+
+// URL params: ?time=18 (also legacy ?light=day|sunset), ?cycle=1
+{
+  const p = new URLSearchParams(location.search);
+  let t = p.get('time');
+  if (t === null) {
+    const l = p.get('light');
+    t = l === 'day' ? '12' : (l === 'sunset' ? '18' : null);
+  }
+  if (t !== null) {
+    const v = parseFloat(t);
+    if (!isNaN(v)) timeOfDay = Math.min(24, Math.max(0, v));
+  }
+  if (p.get('cycle') === '1') { autoCycle = true; cycleBtn.textContent = '⏸ Pause'; }
+}
+timeSlider.value = timeOfDay;
+timeLabel.textContent = fmtTime(timeOfDay);
+applyTimeOfDay(timeOfDay);
+
+// 🎲 random landscape
+document.getElementById('rand-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('rand-btn');
+  btn.disabled = true; btn.textContent = '🎲 …';
+  try {
+    const r = await authedFetch('/api/random_landscape', { method: 'POST' });
+    const j = await r.json();
+    if (j.ok && j.summary) {
+      promptStatus.textContent = `new landscape: ${j.summary.blocks} blocks, seed ${j.summary.seed}`;
+      promptStatus.classList.remove('err');
+    } else {
+      promptStatus.textContent = 'landscape failed';
+      promptStatus.classList.add('err');
+    }
+  } catch (e) {
+    promptStatus.textContent = 'server unreachable';
+    promptStatus.classList.add('err');
+  } finally {
+    btn.disabled = false; btn.textContent = '🎲 Random';
+  }
+});
 
 // ground grid (y=0 = sea level reference)
 const grid = new THREE.GridHelper(96, 48, 0x33406a, 0x232c4a);
@@ -613,7 +742,18 @@ function connect() {
 connect();
 
 // ---------- animate ----------
-renderer.setAnimationLoop(() => {
+let lastFrameT = 0;
+renderer.setAnimationLoop((t) => {
+  if (lastFrameT) {
+    const dt = (t - lastFrameT) / 1000;
+    if (autoCycle) {
+      timeOfDay = (timeOfDay + CYCLE_HOURS_PER_SEC * dt) % 24;
+      timeSlider.value = timeOfDay;
+      timeLabel.textContent = fmtTime(timeOfDay);
+    }
+  }
+  lastFrameT = t;
+  applyTimeOfDay(timeOfDay);
   controls.update();
   renderer.render(scene, camera);
 });

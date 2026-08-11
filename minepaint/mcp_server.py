@@ -412,10 +412,13 @@ async def execute_tool_call(name: str, args: Dict[str, Any]) -> Any:
         sc = getattr(res, "structured_content", None)
         if isinstance(sc, dict) and "result" in sc:
             return sc["result"]
+        txt = "".join(getattr(c, "text", "") for c in (getattr(res, "content", None) or []))
         if getattr(res, "isError", False):
-            txt = "".join(getattr(c, "text", "") for c in (getattr(res, "content", None) or []))
             return {"error": txt[:300] or "tool error"}
-        return {"ok": True, "raw": str(res)[:300]}
+        try:
+            return json.loads(txt)  # dict-returning tools come back as JSON text
+        except Exception:
+            return {"ok": True, "raw": txt[:300]}
     except Exception as e:  # surface errors back to the LLM so it can retry
         return {"error": f"{type(e).__name__}: {e}"}
 
