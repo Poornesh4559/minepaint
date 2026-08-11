@@ -160,6 +160,22 @@ async def main() -> int:
             except RuntimeError as ex:
                 check("out-of-bounds copy_entity raises error", "out of bounds" in str(ex).lower(), str(ex)[:80])
 
+            # terrain generation: dramatic snowy mountains + ocean
+            terr = await call(session, "generate_terrain", seed=5, sea_level=12,
+                              snowline=26, mountain_amp=44.0)
+            check("generate_terrain returns by_type summary",
+                  "by_type" in terr and terr["blocks"] > 30000, str(terr.get("blocks")))
+            bt = terr.get("by_type", {})
+            check("terrain has snow caps", bt.get("snow", 0) > 500, f"snow={bt.get('snow')}")
+            check("terrain has water (ocean/river)", bt.get("water", 0) > 2000, f"water={bt.get('water')}")
+            check("terrain has bedrock crust", bt.get("bedrock", 0) > 5000, f"bedrock={bt.get('bedrock')}")
+            check("terrain height range includes negatives (seabed)",
+                  terr.get("peak_height", 0) > 0, str(terr.get("peak_height")))
+            st = await call(session, "get_state")
+            y_vals = [b[1] for b in st["blocks"]]
+            check("terrain extends below y=0", min(y_vals) < 0, f"min_y={min(y_vals)}")
+            check("terrain reaches snowline heights", max(y_vals) > 30, f"max_y={max(y_vals)}")
+
     print()
     if failures:
         print(f"RESULT: {len(failures)} FAILED")

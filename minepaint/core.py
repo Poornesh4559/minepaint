@@ -15,8 +15,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-WORLD_SIZE = (64, 32, 64)
+# Footprint 96x96, vertical range -32..63 (96 tall): terrain extends BELOW
+# y=0 (seabed / bedrock), like Minecraft's negative-depth world.
+WORLD_SIZE = (96, 96, 96)
 W, H, D = WORLD_SIZE
+Y_MIN = -32
+Y_MAX = Y_MIN + H - 1
 
 
 class WorldError(Exception):
@@ -87,12 +91,13 @@ PALETTE_DOC = {
 def _bounds_error(x: int, y: int, z: int) -> OutOfBoundsError:
     return OutOfBoundsError(
         f"({x},{y},{z}) is out of bounds. Valid range: "
-        f"x in [0,{W - 1}], y in [0,{H - 1}] (y = up, ground is y=0), z in [0,{D - 1}]."
+        f"x in [0,{W - 1}], y in [{Y_MIN},{Y_MAX}] (y = up; ground near y=0; "
+        f"seabed/bedrock below), z in [0,{D - 1}]."
     )
 
 
 def check_bounds(x: int, y: int, z: int) -> None:
-    if not (0 <= x < W and 0 <= y < H and 0 <= z < D):
+    if not (0 <= x < W and Y_MIN <= y <= Y_MAX and 0 <= z < D):
         raise _bounds_error(x, y, z)
 
 
@@ -130,7 +135,7 @@ class Entity:
 
 
 class World:
-    """64 x 32 x 64 voxel grid with layers and entities."""
+    """96 x 96 x 96 voxel grid (y from -32 to 63) with layers and entities."""
 
     def __init__(self) -> None:
         self.size: Tuple[int, int, int] = WORLD_SIZE
@@ -224,7 +229,7 @@ class World:
             if not 0 <= x < W:
                 raise _bounds_error(x, lo_y, lo_z)
         for y in (lo_y, hi_y):
-            if not 0 <= y < H:
+            if not Y_MIN <= y <= Y_MAX:
                 raise _bounds_error(lo_x, y, lo_z)
         for z in (lo_z, hi_z):
             if not 0 <= z < D:
@@ -364,6 +369,7 @@ class World:
     def to_json(self) -> Dict[str, Any]:
         return {
             "size": list(self.size),
+            "y_min": Y_MIN,
             "layers": [
                 {"id": l.id, "name": l.name, "visible": l.visible, "order": l.order}
                 for l in self.layers_sorted()

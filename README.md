@@ -2,22 +2,35 @@
 
 A Minecraft-styled **paint tool for AI assistants**. An LLM drives a 3D voxel
 world through MCP tools — place blocks, fill cuboids, build one object as an
-*entity* and copy/move it around, paint on separate *layers* — while a Three.js
-viewer shows the world live in 3D and can export any camera angle as a JPG.
+*entity* and copy/move it around, paint on separate *layers*, or generate
+full terrain (mountains, rivers, oceans, snow caps). A Three.js viewer shows
+the world live in 3D with sunset/day lighting and can export any camera angle
+as a JPG. The viewer has a **prompt box** — type a scene, and the LLM plans
+and paints it for you.
 
 ```
-LLM (Hermes / OpenCode / Claude) → MCP tools → world state → WebSocket → Three.js viewer
+LLM (Hermes / OpenCode / viewer prompt box) → MCP tools → world state
+        → WebSocket → Three.js viewer → Export JPG
 ```
 
 ## Quick start
 
 ```bash
 # web viewer + live WS + HTTP MCP  →  http://localhost:8766
-.venv/bin/uvicorn minepaint.web_server:app --host 0.0.0.0 --port 8766
+.venv/bin/uvicorn minepaint.web_server:app --host 127.0.0.1 --port 8766
 
 # MCP server over stdio (for client configs) — same world state
 .venv/bin/python -m minepaint.mcp_server
 ```
+
+**Auth**: the viewer requires a token. It's auto-generated on first run and
+appended to `~/.hermes/.env` as `MINEPAINT_TOKEN`. First page load asks for it
+and remembers it (localStorage). All WS/API calls require it.
+
+**Prompt box**: bottom-left in the viewer. The prompt runs through the
+opencode CLI (`opencode-go/deepseek-v4-flash` by default; override with the
+`MINEPAINT_LLM_MODEL` env var). The LLM returns a JSON plan of tool calls,
+executed in-process; the world updates live.
 
 ## MCP client config
 
@@ -28,14 +41,15 @@ LLM (Hermes / OpenCode / Claude) → MCP tools → world state → WebSocket →
     "command": ["/home/ubuntu/minepaint/.venv/bin/python", "-m", "minepaint.mcp_server"],
     "cwd": "/home/ubuntu/minepaint", "enabled": true } } }
 
-// Claude Desktop: same command/args; or HTTP: url http://localhost:8766/mcp
+// Claude Desktop: same command/args; or HTTP: url http://127.0.0.1:8766/mcp
 ```
 
-## Tools (18)
+## Tools (19)
 
 | Tool | What it does |
 |---|---|
-| `world_info` / `get_state` | canvas summary / full world JSON (read-back before drawing) |
+| `world_info` / `get_state` | canvas summary / full world JSON (read-back) |
+| `generate_terrain` | **terrain**: ridged mountains, snow caps, rocky slopes, beaches, oceans, meandering river. Tuned recipe: `seed=<n>, sea_level=12, snowline=26, mountain_amp=44` |
 | `place_block` / `delete_block` | one block |
 | `fill_cuboid` | fill an inclusive 3D box |
 | `create_layer` / `list_layers` / `set_layer_visible` / `delete_layer` | layered canvas stack |
@@ -44,25 +58,21 @@ LLM (Hermes / OpenCode / Claude) → MCP tools → world state → WebSocket →
 | `move_entity` / `delete_entity` | relocate / remove an entity |
 | `save_world` / `load_world` / `reset_world` | JSON persistence (`data/world.json`, autosaved) |
 
+World: **96 × 96 footprint, y from −32 (seabed/bedrock) to +63**. y = up.
 Palette is fixed (18 block types) — the LLM cannot invent block types.
 
-## Example LLM prompt
+## Viewer
 
-> Build a house with a lava moat and 3 trees around it. Make the house a
-> 7x3x7 cuboid of brick on a grass floor, put the trees in a "nature" layer as
-> an entity, then copy_entity the tree twice.
-
-## Architecture
-
-- `minepaint/core.py` — pure world model (grid, layers, entities, palette)
-- `minepaint/mcp_server.py` — FastMCP tools over stdio; autosaves after each mutation
-- `minepaint/web_server.py` — FastAPI: serves viewer, `/ws` live push, `/mcp` HTTP transport
-- `web/viewer.html` — single-file Three.js (CDN) viewer: orbit cam, camera presets
-  (Isometric/Top/Front/Side), layer visibility, palette legend, **Export JPG**
-  (supersampled render of the current angle)
+- Orbit camera + presets (Isometric / Top / Front / Side) + cinematic URL
+  params: `?camx=&camy=&camz=&tgtx=&tgty=&tgtz=`
+- **Sunset / Day** lighting toggle; sunset = warm sun + purple→orange sky + haze
+- Layer visibility toggles, palette legend, per-block color jitter (pseudo-texture)
+- **Export JPG**: supersampled render of the current camera angle
+- **Prompt box**: LLM paints your scene (opencode CLI backend)
 
 ## Test
 
 ```bash
-.venv/bin/python tests/test_client.py   # 26 checks: layers, entities, copy/move, bounds
+.venv/bin/python tests/test_client.py   # 33 checks: layers, entities, copy/move,
+                                        # bounds, terrain (snow/ocean/seabed)
 ```

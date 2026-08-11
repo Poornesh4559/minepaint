@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -39,8 +40,14 @@ def set_world_path(path: Path) -> None:
 
 def load_world_from_disk() -> None:
     if _world_path.exists():
-        with open(_world_path) as f:
-            world.from_json(json.load(f))
+        try:
+            with open(_world_path) as f:
+                world.from_json(json.load(f))
+        except WorldError as e:
+            # e.g. a saved world from an older world-size build: don't crash,
+            # start fresh instead.
+            print(f"[minepaint] ignoring saved world ({e}); starting fresh", file=sys.stderr)
+            world.reset()
 
 
 def add_mutation_listener(fn: Callable[[], None]) -> None:
@@ -76,8 +83,13 @@ def _summary() -> Dict[str, Any]:
 
 
 def _range_doc() -> str:
+    from minepaint.core import Y_MAX, Y_MIN
+
     w, h, d = world.size
-    return f"x in [0,{w - 1}], y in [0,{h - 1}] (y = up, ground y=0), z in [0,{d - 1}]"
+    return (
+        f"x in [0,{w - 1}], y in [{Y_MIN},{Y_MAX}] (y = up; ground near y=0; "
+        f"seabed/bedrock below), z in [0,{d - 1}]"
+    )
 
 
 load_world_from_disk()
@@ -90,7 +102,7 @@ def world_info() -> Dict[str, Any]:
 
     Cheap -- call this before get_state to see if the canvas changed.
 
-    Example: world_info() -> {"size": [64,32,64], "layers": [...], "block_count": 0, "entity_count": 0}
+    Example: world_info() -> {"size": [96,96,96], "layers": [...], "block_count": 0, "entity_count": 0}
     """
     return _summary()
 
@@ -100,9 +112,10 @@ def get_state() -> Dict[str, Any]:
     """Full world JSON: {size, layers, blocks, entities}.
 
     Blocks are [x, y, z, type, layer_id, entity_id]. Use this to read the
-    whole canvas before drawing. Coordinate convention: y = up, ground y=0.
+    whole canvas before drawing. Coordinate convention: y = up; y can be
+    negative (seabed/bedrock below y=0). Large worlds: prefer world_info().
 
-    Example: get_state() -> {"size":[64,32,64],"layers":[{"id":"house","name":"house","visible":True,"order":0}],"blocks":[[0,0,0,"grass","house",None]],"entities":[]}
+    Example: get_state() -> {"size":[96,96,96],"layers":[{"id":"house","name":"house","visible":True,"order":0}],"blocks":[[0,0,0,"grass","house",None]],"entities":[]}
     """
     return world.to_json()
 
@@ -352,13 +365,77 @@ def load_world(path: Optional[str] = None) -> Dict[str, Any]:
 
 @mcp.tool
 def reset_world() -> Dict[str, Any]:
-    """Wipe the world to a fresh empty 64x32x64 canvas (no layers/entities).
+    """Wipe the world to a fresh empty canvas (no layers/entities).
 
-    Example: reset_world() -> {"reset":True,"size":[64,32,64]}
+    Example: reset_world() -> {"reset":True,"size":[96,96,96]}
     """
     world.reset()
     _after_mutation()
     return {"reset": True, "size": list(world.size)}
+
+
+@mcp.tool
+def generate_terrain(
+    seed: int = 1,
+    sea_level: int = 7,
+    snowline: int = 38,
+    mountain_amp: float = 34.0,
+    river: bool = True,
+) -> Dict[str, Any]:
+    """Generate a full terrain landscape, replacing the whole world.
+
+    Creates ridged mountain ranges (peaks above snowline get snow), oceans
+    (water fills up to sea_level, beaches of sand), and carves a meandering
+    river valley down to the nearest edge. Blocks go on a layer called
+    "terrain" (previous layers/entities are wiped).
+
+    Defaults: sea_level=7 (oceans), snowline=38 (snow above y=38). Larger
+    mountain_amp = taller peaks. Use a different seed for a different layout.
+
+    Example: generate_terrain(seed=42) -> {"terrain":"generated","seed":42,"blocks":189221,"peak_height":46.1,...}
+    """
+    from minepaint.terrain import generate as _gen
+
+    try:
+        summary = _gen(world, seed=seed, sea_level=sea_level, snowline=snowline,
+                       mountain_amp=mountain_amp, river=river)
+    except ValueError as e:
+        raise WorldError(str(e))
+    _after_mutation()
+    return summary
+
+
+async def execute_tool_call(name: str, args: Dict[str, Any]) -> Any:
+    """Run an MCP tool in-process (used by the web API's LLM loop)."""
+    try:
+        res = await mcp.call_tool(name, args)
+        sc = getattr(res, "structured_content", None)
+        if isinstance(sc, dict) and "result" in sc:
+            return sc["result"]
+        if getattr(res, "isError", False):
+            txt = "".join(getattr(c, "text", "") for c in (getattr(res, "content", None) or []))
+            return {"error": txt[:300] or "tool error"}
+        return {"ok": True, "raw": str(res)[:300]}
+    except Exception as e:  # surface errors back to the LLM so it can retry
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+async def world_summary_for_llm() -> str:
+    """Compact text context describing the world + available tools."""
+    tools = await mcp.list_tools()
+    lines = [
+        f"World footprint: {world.size[0]} x {world.size[2]}, vertical range: {_range_doc()}",
+        f"Layers: {[l.name for l in world.layers_sorted()] or 'none'}",
+        f"Entities: {[e.id for e in world.entities.values()] or 'none'}",
+        f"Block count: {world.block_count}",
+        "",
+        "Available tools (name(parameters): description):",
+    ]
+    for t in sorted(tools, key=lambda x: x.name):
+        params = ", ".join(t.parameters.get("properties", {}).keys())
+        desc = (t.description or "").split("\n\n")[0].replace("\n", " ")
+        lines.append(f"- {t.name}({params}): {desc}")
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":

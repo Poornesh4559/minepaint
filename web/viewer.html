@@ -9,10 +9,10 @@
 <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #14141c;
-    --panel: rgba(24, 24, 34, 0.92);
-    --panel-border: #2c2c3e;
-    --accent: #7CBD4B;
+    --bg: #0d0f18;
+    --panel: rgba(18, 20, 32, 0.92);
+    --panel-border: #2a3048;
+    --accent: #ffb36b;
     --text: #d8d8e8;
     --dim: #8a8aa0;
     --mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
@@ -25,7 +25,6 @@
   #canvas-wrap { position: absolute; inset: 0; }
   canvas { display: block; }
 
-  /* ---------- HUD chrome ---------- */
   .hud {
     position: fixed; background: var(--panel); border: 1px solid var(--panel-border);
     border-radius: 8px; padding: 10px 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.45);
@@ -36,7 +35,6 @@
     color: var(--accent); text-transform: uppercase;
   }
 
-  /* left: palette legend */
   #legend { top: 12px; left: 12px; width: 176px; }
   #legend .palette-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; }
   .pal-item { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--dim); }
@@ -46,27 +44,24 @@
     image-rendering: pixelated;
   }
 
-  /* right: layer panel */
-  #layers { top: 12px; right: 12px; min-width: 180px; max-width: 240px; }
+  #layers { top: 12px; right: 12px; min-width: 170px; max-width: 230px; }
   .layer-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 11px; }
   .layer-row input { accent-color: var(--accent); cursor: pointer; }
   .layer-row .lname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .layer-row .lname.hidden { color: var(--dim); text-decoration: line-through; }
 
-  /* top center: title + camera presets */
-  #topbar { top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 14px; padding: 8px 14px; }
+  #topbar { top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; padding: 8px 14px; }
   #topbar .title { font-family: var(--pixel); font-size: 12px; color: #fff; letter-spacing: 1px; }
   #topbar .title span { color: var(--accent); }
   .btn-group { display: flex; gap: 6px; }
-  button.cam {
+  button.cam, button.light {
     font-family: var(--mono); font-size: 10px; color: var(--text); background: #22222e;
     border: 1px solid var(--panel-border); border-radius: 5px; padding: 5px 9px; cursor: pointer;
     transition: all 120ms ease;
   }
-  button.cam:hover { border-color: var(--accent); color: #fff; }
-  button.cam.active { background: var(--accent); border-color: var(--accent); color: #101018; font-weight: 600; }
+  button.cam:hover, button.light:hover { border-color: var(--accent); color: #fff; }
+  button.cam.active, button.light.active { background: var(--accent); border-color: var(--accent); color: #101018; font-weight: 600; }
 
-  /* bottom center: export + status */
   #bottom-bar { bottom: 14px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 14px; padding: 8px 16px; }
   button.export {
     font-family: var(--pixel); font-size: 10px; color: #101018; background: var(--accent);
@@ -81,15 +76,62 @@
   #status .dot.off { background: #f87171; box-shadow: 0 0 8px rgba(248,113,113,0.7); }
   #status .count { color: var(--text); }
 
+  #prompt-box { bottom: 14px; left: 12px; width: 340px; max-width: 46vw; }
+  #prompt-box textarea {
+    width: 100%; resize: none; border: 1px solid var(--panel-border); border-radius: 6px;
+    background: #0b0d16; color: var(--text); font-family: var(--mono); font-size: 12px;
+    padding: 9px 10px; outline: none; min-height: 54px;
+  }
+  #prompt-box textarea:focus { border-color: var(--accent); }
+  #prompt-row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+  button.prompt-send {
+    font-family: var(--pixel); font-size: 9px; background: var(--accent); color: #101018;
+    border: 0; border-radius: 5px; padding: 9px 12px; cursor: pointer;
+  }
+  button.prompt-send:disabled { opacity: 0.45; cursor: wait; }
+  #prompt-status { font-size: 10px; color: var(--dim); flex: 1; text-align: right; }
+  #prompt-status.err { color: #ff6b6b; }
+
+  #token-modal {
+    position: fixed; inset: 0; z-index: 50; display: none; align-items: center; justify-content: center;
+    background: rgba(8, 10, 18, 0.88); backdrop-filter: blur(6px);
+  }
+  #token-modal.show { display: flex; }
+  #token-modal .card {
+    background: var(--panel); border: 1px solid var(--panel-border); border-radius: 12px;
+    padding: 30px 34px; width: 340px; text-align: center;
+  }
+  #token-modal h2 { font-family: var(--pixel); font-size: 12px; color: var(--accent); margin: 0 0 8px; }
+  #token-modal p { font-size: 12px; color: var(--dim); margin: 0 0 18px; }
+  #token-modal input {
+    width: 100%; padding: 11px; border-radius: 8px; border: 1px solid var(--panel-border);
+    background: #0b0d16; color: var(--text); font-family: var(--mono); outline: none;
+  }
+  #token-modal input:focus { border-color: var(--accent); }
+  #token-modal button {
+    margin-top: 14px; width: 100%; padding: 11px; border: 0; border-radius: 8px;
+    background: var(--accent); color: #101018; font-weight: bold; cursor: pointer; font-family: var(--mono);
+  }
+  #token-modal #token-err { color: #ff6b6b; font-size: 11px; height: 15px; margin-top: 8px; }
+
   @media (max-width: 900px) {
     #legend { display: none; }
     #topbar .title { font-size: 10px; }
+    #prompt-box { width: 300px; max-width: 60vw; }
   }
 </style>
 </head>
 <body>
-  <div id="app">
-    <div id="canvas-wrap"></div>
+  <div id="app"><div id="canvas-wrap"></div></div>
+
+  <div id="token-modal">
+    <div class="card">
+      <h2>⛏️ minepaint</h2>
+      <p>Enter the access token to open the canvas.</p>
+      <input id="token-input" type="password" placeholder="access token" autocomplete="off">
+      <button id="token-btn">Open canvas</button>
+      <div id="token-err"></div>
+    </div>
   </div>
 
   <div id="topbar" class="hud">
@@ -99,6 +141,10 @@
       <button class="cam" data-cam="top">Top</button>
       <button class="cam" data-cam="front">Front</button>
       <button class="cam" data-cam="side">Side</button>
+    </div>
+    <div class="btn-group" id="light-group">
+      <button class="light active" data-light="sunset">Sunset</button>
+      <button class="light" data-light="day">Day</button>
     </div>
   </div>
 
@@ -121,6 +167,15 @@
     </div>
   </div>
 
+  <div id="prompt-box" class="hud">
+    <h2>Ask the painter</h2>
+    <textarea id="prompt-input" placeholder='e.g. "snowy mountains at sunset, river through the valley, a few pine trees"'></textarea>
+    <div id="prompt-row">
+      <button class="prompt-send" id="prompt-send">Paint it</button>
+      <span id="prompt-status"></span>
+    </div>
+  </div>
+
 <script type="importmap">
 {
   "imports": {
@@ -134,6 +189,58 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
+// ---------- auth ----------
+const TOKEN_KEY = 'minepaint_token';
+function getToken() {
+  let tok = localStorage.getItem(TOKEN_KEY);
+  const fromUrl = new URLSearchParams(location.search).get('token');
+  if (fromUrl) {
+    tok = fromUrl;
+    localStorage.setItem(TOKEN_KEY, tok);
+    // strip ONLY the token, keep light/cam/ui params
+    const u = new URL(location.href);
+    u.searchParams.delete('token');
+    history.replaceState({}, '', u.toString());
+  }
+  return tok;
+}
+let token = getToken();
+
+const tokenModal = document.getElementById('token-modal');
+function showTokenModal() {
+  tokenModal.classList.add('show');
+  setTimeout(() => document.getElementById('token-input').focus(), 50);
+}
+async function submitToken() {
+  const inp = document.getElementById('token-input');
+  const err = document.getElementById('token-err');
+  err.textContent = '';
+  const tok = inp.value.trim();
+  if (!tok) { err.textContent = 'token required'; return; }
+  try {
+    const r = await fetch('/api/auth/check', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: tok })
+    });
+    const j = await r.json();
+    if (j.ok) {
+      token = tok;
+      localStorage.setItem(TOKEN_KEY, tok);
+      tokenModal.classList.remove('show');
+      connect();
+    } else err.textContent = 'wrong token';
+  } catch (e) { err.textContent = 'server unreachable'; }
+}
+document.getElementById('token-btn').addEventListener('click', submitToken);
+document.getElementById('token-input').addEventListener('keydown', e => { if (e.key === 'Enter') submitToken(); });
+
+function authedFetch(url, opts = {}) {
+  return fetch(url, {
+    ...opts,
+    headers: { ...(opts.headers || {}), 'Authorization': 'Bearer ' + (token || '') }
+  });
+}
+
 // ---------- palette (mirrors minepaint/core.py) ----------
 const PALETTE = {
   grass: '#5B9E3A', dirt: '#8B5A2B', stone: '#7D7D7D', cobblestone: '#6E6E6E',
@@ -142,52 +249,129 @@ const PALETTE = {
   lava: '#E8651A', bedrock: '#3A3A3A', gold_ore: '#E0B72C', diamond_ore: '#5FDBD0',
   netherrack: '#7A2226', cactus: '#2E8B3D'
 };
-const OPAQUE = ['water', 'glass', 'lava'];
+const TRANSPARENT = ['water', 'glass', 'lava'];
+// block types that get a subtle per-instance tint (pseudo-texture)
+const JITTER = new Set(['grass', 'dirt', 'stone', 'cobblestone', 'sand', 'snow',
+  'oak_leaves', 'oak_log', 'oak_planks', 'brick', 'gold_ore', 'diamond_ore',
+  'netherrack', 'cactus', 'bedrock']);
 
-const [W, H, D] = [64, 32, 64];
-const CENTER = new THREE.Vector3(W / 2, 8, D / 2);
-
-// ---------- scene setup ----------
 const wrap = document.getElementById('canvas-wrap');
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0d0d15);
 
-const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 1000);
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 2000);
 const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
-renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.shadowMap.enabled = false;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.3;
 wrap.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.copy(CENTER);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
-controls.maxPolarAngle = Math.PI;
 
-// lights: warm ambient + strong top light so tops are bright, bottoms dark (Minecraft-y)
-scene.add(new THREE.AmbientLight(0x8a93b8, 0.55));
+// ---------- world dims ----------
+const worldMeta = { w: 96, yMin: -32, yMax: 63, d: 96, center: new THREE.Vector3(47.5, 15.5, 47.5) };
+function setWorldMeta(size, yMin) {
+  const w = size[0], h = size[1], d = size[2];
+  const y0 = (yMin !== undefined && yMin !== null) ? yMin : 0;
+  worldMeta.w = w; worldMeta.d = d; worldMeta.yMin = y0; worldMeta.yMax = y0 + h - 1;
+  worldMeta.center.set((w - 1) / 2, (y0 + y0 + h - 1) / 2, (d - 1) / 2);
+}
+
+// ---------- sky / lighting ----------
+function makeSkyTexture(light) {
+  const c = document.createElement('canvas');
+  c.width = 2; c.height = 512;
+  const ctx = c.getContext('2d');
+  const g = ctx.createLinearGradient(0, 0, 0, 512);
+  if (light === 'sunset') {
+    g.addColorStop(0.00, '#14092e');
+    g.addColorStop(0.35, '#3d1a4e');
+    g.addColorStop(0.62, '#8a3450');
+    g.addColorStop(0.82, '#e0693f');
+    g.addColorStop(1.00, '#ffb36b');
+  } else {
+    g.addColorStop(0.00, '#2c4a7c');
+    g.addColorStop(0.45, '#6d9ad1');
+    g.addColorStop(0.75, '#a8c8ea');
+    g.addColorStop(1.00, '#dbe9f7');
+  }
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 2, 512);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+let skyTex = makeSkyTexture('sunset');
+let sky = new THREE.Mesh(
+  new THREE.SphereGeometry(900, 24, 12),
+  new THREE.MeshBasicMaterial({ map: skyTex, side: THREE.BackSide, fog: false, depthWrite: false })
+);
+sky.renderOrder = -10;
+scene.add(sky);
+
+const ambient = new THREE.AmbientLight(0x8a93b8, 0.55);
 const sun = new THREE.DirectionalLight(0xffffff, 1.15);
-sun.position.set(0.5, 1, 0.35);
-scene.add(sun);
-scene.add(new THREE.HemisphereLight(0xbcd0ff, 0x20202a, 0.35));
+const hemi = new THREE.HemisphereLight(0xbcd0ff, 0x20202a, 0.35);
+scene.add(ambient); scene.add(sun); scene.add(hemi);
 
-// faint grid helper on the ground for orientation
-const grid = new THREE.GridHelper(64, 32, 0x33334a, 0x22223a);
-grid.position.set(W / 2, -0.01, D / 2);
+// visible sun disc
+const sunDisc = new THREE.Mesh(
+  new THREE.SphereGeometry(26, 16, 16),
+  new THREE.MeshBasicMaterial({ color: 0xffd9a0, fog: false })
+);
+scene.add(sunDisc);
+
+let currentLight = 'sunset';
+function applyLight(light) {
+  currentLight = light;
+  scene.background = null; // gradient sky sphere provides the backdrop
+  scene.fog = new THREE.FogExp2(light === 'sunset' ? 0xe08a5f : 0x9fb4d8, light === 'sunset' ? 0.003 : 0.0035);
+  if (light === 'sunset') {
+    ambient.color.set(0x6a4a8a); ambient.intensity = 1.05;
+    sun.color.set(0xffa04d); sun.intensity = 2.6;
+    hemi.color.set(0xffb07a); hemi.groundColor.set(0x2a1438); hemi.intensity = 1.0;
+    // sun behind/right of a north-looking camera -> lights the faces we see
+    sun.position.set(0.38, 0.25, 0.85).normalize().multiplyScalar(700);
+    sunDisc.material.color.set(0xffd9a0);
+    sunDisc.position.copy(sun.position);
+  } else {
+    ambient.color.set(0x8a93b8); ambient.intensity = 0.7;
+    sun.color.set(0xffffff); sun.intensity = 1.4;
+    hemi.color.set(0xbcd0ff); hemi.groundColor.set(0x20202a); hemi.intensity = 0.5;
+    sun.position.set(0.5, 1, 0.35).normalize().multiplyScalar(700);
+    sunDisc.position.copy(sun.position);
+  }
+  sun.target.position.copy(worldMeta.center);
+  sun.target.updateMatrixWorld();
+}
+applyLight(new URLSearchParams(location.search).get('light') === 'day' ? 'day' : 'sunset');
+
+document.querySelectorAll('.light').forEach(btn =>
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.light').forEach(b => b.classList.toggle('active', b === btn));
+    applyLight(btn.dataset.light);
+  }));
+
+// ground grid (y=0 = sea level reference)
+const grid = new THREE.GridHelper(96, 48, 0x33406a, 0x232c4a);
+grid.material.transparent = true;
+grid.material.opacity = 0.5;
+grid.position.set(47.5, 0, 47.5);
 scene.add(grid);
 
 // ---------- world rendering ----------
-let meshes = [];            // InstancedMesh per block type
-let currentWorld = null;    // last world JSON
+let meshes = [];
+let currentWorld = null;
 const hiddenLayers = new Set();
 
 function makeMaterial(type) {
   const color = new THREE.Color(PALETTE[type] || '#aaaaaa');
-  if (OPAQUE.includes(type)) {
+  if (TRANSPARENT.includes(type)) {
     const m = new THREE.MeshLambertMaterial({
       color, transparent: true,
-      opacity: type === 'glass' ? 0.42 : 0.72,
+      opacity: type === 'glass' ? 0.42 : (type === 'water' ? 0.68 : 0.75),
       depthWrite: type === 'glass' ? false : true
     });
     if (type === 'lava') m.emissive = new THREE.Color(0x401000);
@@ -198,7 +382,6 @@ function makeMaterial(type) {
 
 function rebuild() {
   if (!currentWorld) return;
-  // dispose old
   for (const mesh of meshes) {
     mesh.geometry.dispose();
     mesh.material.dispose();
@@ -211,7 +394,7 @@ function rebuild() {
     if (l.visible !== false && !hiddenLayers.has(l.id)) layerVisible.add(l.id);
   }
 
-  const byType = new Map();  // type -> array of [x,y,z]
+  const byType = new Map();
   for (const b of currentWorld.blocks) {
     if (!layerVisible.has(b[4])) continue;
     if (!byType.has(b[3])) byType.set(b[3], []);
@@ -219,16 +402,24 @@ function rebuild() {
   }
 
   const dummy = new THREE.Object3D();
+  const tmpColor = new THREE.Color();
   for (const [type, cells] of byType) {
     const geo = new THREE.BoxGeometry(1, 1, 1);
     const mat = makeMaterial(type);
     const mesh = new THREE.InstancedMesh(geo, mat, cells.length);
+    const jitter = JITTER.has(type);
+    const base = new THREE.Color(PALETTE[type] || '#aaaaaa');
     cells.forEach(([x, y, z], i) => {
       dummy.position.set(x + 0.5, y + 0.5, z + 0.5);
       dummy.updateMatrix();
       mesh.setMatrixAt(i, dummy.matrix);
+      if (jitter) {
+        tmpColor.copy(base).multiplyScalar(0.9 + Math.random() * 0.2);
+        mesh.setColorAt(i, tmpColor);
+      }
     });
     mesh.instanceMatrix.needsUpdate = true;
+    if (jitter && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     mesh.frustumCulled = false;
     scene.add(mesh);
     meshes.push(mesh);
@@ -236,7 +427,6 @@ function rebuild() {
   renderLayers();
 }
 
-// ---------- layer panel ----------
 function renderLayers() {
   const list = document.getElementById('layer-list');
   if (!currentWorld) { list.innerHTML = '<div style="font-size:10px;color:var(--dim)">no layers yet</div>'; return; }
@@ -261,7 +451,6 @@ function renderLayers() {
   }
 }
 
-// ---------- palette legend ----------
 function renderPalette() {
   const gridEl = document.getElementById('palette-grid');
   gridEl.innerHTML = '';
@@ -280,27 +469,44 @@ function renderPalette() {
 }
 renderPalette();
 
-// ---------- camera presets ----------
-const PRESETS = {
-  iso:   { pos: [46, 42, 46], tgt: [W / 2, 8, D / 2] },
-  top:   { pos: [W / 2, 70, D / 2 + 0.01], tgt: [W / 2, 8, D / 2] },
-  front: { pos: [W / 2, 14, 92], tgt: [W / 2, 8, D / 2] },
-  side:  { pos: [92, 14, D / 2], tgt: [W / 2, 8, D / 2] },
-};
+// ---------- camera presets (scale with world) ----------
 function applyPreset(name) {
-  const p = PRESETS[name];
-  camera.position.set(...p.pos);
-  controls.target.set(...p.tgt);
+  const c = worldMeta.center;
+  const pad = worldMeta.w * 0.85;
+  const P = {
+    iso:   [c.x + pad * 0.8, c.y + pad * 0.72, c.z + pad * 0.8],
+    top:   [c.x, worldMeta.yMax + worldMeta.w * 1.1, c.z + 0.01],
+    front: [c.x, c.y + 10, worldMeta.d + 34],
+    side:  [worldMeta.w + 34, c.y + 10, c.z],
+  };
+  camera.position.set(...P[name]);
+  controls.target.copy(c);
   controls.update();
   document.querySelectorAll('.cam').forEach(b => b.classList.toggle('active', b.dataset.cam === name));
 }
 document.querySelectorAll('.cam').forEach(btn =>
   btn.addEventListener('click', () => applyPreset(btn.dataset.cam)));
-applyPreset('iso');
+
+// optional cinematic camera override: ?camx=&camy=&camz=&tgtx=&tgty=&tgtz=
+const qp = new URLSearchParams(location.search);
+// ?ui=0 hides all HUD chrome for clean cinematic captures
+if (qp.get('ui') === '0') {
+  document.querySelectorAll('.hud').forEach(el => { el.style.display = 'none'; });
+}
+if (qp.has('camx') && qp.has('camy') && qp.has('camz')) {
+  camera.position.set(parseFloat(qp.get('camx')), parseFloat(qp.get('camy')), parseFloat(qp.get('camz')));
+  if (qp.has('tgtx') && qp.has('tgty') && qp.has('tgtz')) {
+    controls.target.set(parseFloat(qp.get('tgtx')), parseFloat(qp.get('tgty')), parseFloat(qp.get('tgtz')));
+  } else {
+    controls.target.copy(worldMeta.center);
+  }
+  controls.update();
+} else {
+  applyPreset('iso');
+}
 
 // ---------- export JPG (2x supersample) ----------
 document.getElementById('export-btn').addEventListener('click', () => {
-  const prevSize = [renderer.domElement.width, renderer.domElement.height];
   const prevRatio = renderer.getPixelRatio();
   const [outW, outH] = [1920, 1080];
   const hiW = outW * 2, hiH = outH * 2;
@@ -317,7 +523,6 @@ document.getElementById('export-btn').addEventListener('click', () => {
   ctx.imageSmoothingEnabled = true;
   ctx.drawImage(renderer.domElement, 0, 0, outW, outH);
 
-  // restore view
   renderer.setPixelRatio(prevRatio);
   renderer.setSize(window.innerWidth, window.innerHeight, false);
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -337,6 +542,40 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
+// ---------- prompt box ----------
+const promptInput = document.getElementById('prompt-input');
+const promptSend = document.getElementById('prompt-send');
+const promptStatus = document.getElementById('prompt-status');
+
+async function sendPrompt() {
+  const prompt = promptInput.value.trim();
+  if (!prompt) return;
+  promptSend.disabled = true;
+  promptStatus.textContent = 'painting…';
+  promptStatus.classList.remove('err');
+  try {
+    const r = await authedFetch('/api/prompt', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt })
+    });
+    const j = await r.json();
+    if (j.ok) {
+      const failed = j.results.filter(x => !x.ok).length;
+      promptStatus.textContent = `done — ${j.executed} tool calls` + (failed ? ` (${failed} failed)` : '');
+    } else {
+      promptStatus.textContent = (j.error || 'something failed').slice(0, 90);
+      promptStatus.classList.add('err');
+    }
+  } catch (e) {
+    promptStatus.textContent = 'server unreachable';
+    promptStatus.classList.add('err');
+  } finally {
+    promptSend.disabled = false;
+  }
+}
+promptSend.addEventListener('click', sendPrompt);
+promptInput.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendPrompt(); });
+
 // ---------- websocket ----------
 const dot = document.getElementById('ws-dot');
 const label = document.getElementById('ws-label');
@@ -348,19 +587,24 @@ function setStatus(state, text) {
 }
 
 function connect() {
+  if (!token) { showTokenModal(); return; }
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  const ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
   ws.onopen = () => setStatus('on', 'live');
-  ws.onclose = () => { setStatus('off', 'offline'); setTimeout(connect, 2000); };
+  ws.onclose = (ev) => {
+    setStatus('off', 'offline');
+    if (ev.code === 4401) { token = null; localStorage.removeItem(TOKEN_KEY); showTokenModal(); }
+    else setTimeout(connect, 2000);
+  };
   ws.onerror = () => ws.close();
   ws.onmessage = (ev) => {
     try {
       const data = JSON.parse(ev.data);
       currentWorld = data;
+      setWorldMeta(data.size || [96, 96, 96], data.y_min);
       rebuild();
       renderLayers();
-      const n = data.blocks ? data.blocks.length : 0;
-      blockCount.textContent = n + ' blocks';
+      blockCount.textContent = (data.blocks ? data.blocks.length : 0) + ' blocks';
     } catch (e) {
       console.error('bad ws payload', e);
     }

@@ -1,44 +1,289 @@
-"""minepaint web server (FastAPI on port 8766).
+"""minepaint web server (FastAPI).
 
-- GET /   -> serves web/viewer.html (Three.js viewer)
-- WS  /ws -> pushes full world JSON to every connected viewer on each mutation
-- /mcp    -> the FastMCP server mounted over HTTP (streamable-http), so remote
-             MCP clients can drive the same world the browser shows
+- GET /             -> login page (no token) or the Three.js viewer (token ok)
+- POST /api/auth/check -> validate a token (used by the login form)
+- POST /api/prompt  -> prompt box: Gemini plans tool calls, executed in-process
+- WS /ws            -> live world pushes (token required)
+- /mcp              -> FastMCP over HTTP (bind 127.0.0.1 for local-only)
 
-Run:  python -m minepaint.web_server
+Secrets live in ~/.hermes/.env: MINEPAINT_TOKEN (web auth). The prompt box
+runs through the opencode CLI (opencode-go/deepseek-v4-flash by default;
+override with MINEPAINT_LLM_MODEL env var).
 """
 
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
+import os
+import re
+import secrets as _secrets
+import shutil
+import sys
 from pathlib import Path
-from typing import Set
+from typing import Any, Dict, List, Optional, Set
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from starlette.websockets import WebSocketState
 
-from minepaint.mcp_server import add_mutation_listener, mcp, world
+from minepaint.mcp_server import (
+    add_mutation_listener,
+    execute_tool_call,
+    mcp,
+    world,
+    world_summary_for_llm,
+)
 
 logger = logging.getLogger("minepaint.web")
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+SECRETS_FILE = Path.home() / ".hermes" / ".env"
 
-# FastMCP's HTTP (streamable-http) app. Mounted at "/" AFTER all app routes
-# below (see bottom of file) with internal path "/mcp", so /mcp hits it
-# directly - no redirect, no path-strip issues. Its lifespan must be passed
-# to the parent FastAPI app or the session manager task group never starts.
+# ------------------------------------------------------------------ secrets
+def _load_secrets() -> Dict[str, str]:
+    env: Dict[str, str] = {}
+    try:
+        for line in SECRETS_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            env[key.strip()] = value.strip()
+    except FileNotFoundError:
+        pass
+    return env
+
+
+def _ensure_token(env: Dict[str, str]) -> str:
+    tok = env.get("MINEPAINT_TOKEN")
+    if not tok:
+        tok = _secrets.token_hex(24)
+        with open(SECRETS_FILE, "a", encoding="utf-8") as f:
+            f.write(f"\n# minepaint web viewer access token\nMINEPAINT_TOKEN={tok}\n")
+        print(
+            f"[minepaint] generated MINEPAINT_TOKEN and appended it to {SECRETS_FILE}",
+            file=sys.stderr,
+        )
+    return tok
+
+
+_secrets_env = _load_secrets()
+TOKEN = _ensure_token(_secrets_env)
+
+
+def token_valid(tok: Optional[str]) -> bool:
+    return bool(tok) and hmac.compare_digest(tok, TOKEN)
+
+
+# --------------------------------------------------------------------- app
 mcp_app = mcp.http_app(path="/mcp")
-app = FastAPI(title="minepaint", version="1.0.0", lifespan=mcp_app.lifespan)
+app = FastAPI(title="minepaint", version="2.0.0", lifespan=mcp_app.lifespan)
+
+
+def _extract_token(request: Request) -> Optional[str]:
+    tok = request.query_params.get("token")
+    if tok:
+        return tok
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return None
+
+
+def require_auth(request: Request) -> None:
+    if not token_valid(_extract_token(request)):
+        raise HTTPException(status_code=401, detail="invalid or missing token")
+
+
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>minepaint — access</title>
+<style>
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+       background:#0b0f1a;color:#e8e6e3;font-family:monospace}
+  .card{background:#141a2b;border:1px solid #2a3450;border-radius:12px;padding:36px 40px;width:340px;text-align:center}
+  h1{font-size:20px;margin:0 0 6px;color:#ffb36b}
+  p{font-size:13px;color:#8b93a8;margin:0 0 22px}
+  input{width:100%;padding:11px 12px;border-radius:8px;border:1px solid #2a3450;background:#0b0f1a;
+        color:#e8e6e3;font-family:monospace;box-sizing:border-box;outline:none}
+  input:focus{border-color:#ffb36b}
+  button{margin-top:14px;width:100%;padding:11px;border:0;border-radius:8px;background:#ffb36b;
+         color:#0b0f1a;font-weight:bold;cursor:pointer;font-family:monospace}
+  #err{color:#ff6b6b;font-size:12px;height:16px;margin-top:10px}
+</style></head><body>
+<div class="card">
+  <h1>⛏️ minepaint</h1>
+  <p>Enter the access token to open the canvas.</p>
+  <input id="tok" type="password" placeholder="access token" autofocus>
+  <button onclick="login()">Open canvas</button>
+  <div id="err"></div>
+</div>
+<script>
+async function login(){
+  const tok = document.getElementById('tok').value.trim();
+  const err = document.getElementById('err'); err.textContent = '';
+  if(!tok){ err.textContent = 'token required'; return; }
+  try{
+    const r = await fetch('/api/auth/check', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({token: tok})});
+    const j = await r.json();
+    if(j.ok){ localStorage.setItem('minepaint_token', tok); location = '/?token=' + encodeURIComponent(tok); }
+    else err.textContent = 'wrong token';
+  }catch(e){ err.textContent = 'server unreachable'; }
+}
+document.getElementById('tok').addEventListener('keydown', e => { if(e.key==='Enter') login(); });
+</script></body></html>"""
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index() -> str:
+async def index(request: Request) -> str:
+    if not token_valid(_extract_token(request)):
+        return LOGIN_HTML
     return (WEB_DIR / "viewer.html").read_text(encoding="utf-8")
 
 
+@app.post("/api/auth/check")
+async def auth_check(request: Request) -> Dict[str, bool]:
+    try:
+        body = await request.json()
+        tok = body.get("token", "")
+    except Exception:
+        tok = ""
+    return {"ok": token_valid(str(tok))}
+
+
+# ------------------------------------------------------------- LLM prompt box
+class LLMPromptError(Exception):
+    pass
+
+
+OPENCODE_MODEL = os.environ.get("MINEPAINT_LLM_MODEL", "opencode-go/deepseek-v4-flash")
+_OPENCODE_BIN: Optional[str] = shutil.which("opencode") or os.environ.get("OPENCODE_BIN")
+
+
+async def _call_opencode(system: str, user: str) -> str:
+    """Run the prompt through the opencode CLI (deepseek-v4-flash by default)."""
+    if not _OPENCODE_BIN:
+        raise LLMPromptError("opencode binary not found on PATH — cannot run the prompt box")
+    prompt = f"{system}\n\n{user}\n\nReply with ONLY the JSON array. Nothing else."
+    proc = await asyncio.create_subprocess_exec(
+        _OPENCODE_BIN, "run", "--model", OPENCODE_MODEL, prompt,
+        cwd=str(Path(__file__).resolve().parent.parent),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env={**os.environ, "NO_COLOR": "1"},
+    )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=180)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise LLMPromptError("opencode timed out after 180s")
+    if proc.returncode != 0:
+        raise LLMPromptError(
+            f"opencode exited {proc.returncode}: {err.decode(errors='replace')[:300]}"
+        )
+    return out.decode(errors="replace").strip()
+
+
+def _parse_tool_calls(text: str) -> List[Dict[str, Any]]:
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text).rstrip("`").strip()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        # last resort: grab the biggest bracket-balanced array in the output
+        start = text.find("[")
+        end = text.rfind("]")
+        if start == -1 or end <= start:
+            raise ValueError(f"no JSON array found; raw output: {text[:200]}")
+        data = json.loads(text[start : end + 1])
+    if isinstance(data, dict):
+        data = data.get("tool_calls") or data.get("calls") or [data]
+    if not isinstance(data, list):
+        raise ValueError("expected a JSON array of tool calls")
+    return data
+
+
+async def run_llm_plan(prompt: str) -> Dict[str, Any]:
+    ctx = await world_summary_for_llm()
+    system = (
+        "You are the painter for 'minepaint', a Minecraft-style 3D voxel canvas.\n"
+        "The user describes a scene; you paint it by replying with ONLY a JSON array "
+        "of tool calls: [{\"tool\": \"name\", \"args\": {...}}, ...].\n"
+        "Rules:\n"
+        "- For landscapes call generate_terrain once. Tuned recipe for dramatic "
+        "snowy mountains + real oceans: snowline=26, sea_level=12, mountain_amp=44 "
+        "(peaks >50 get snow caps, rocky slopes, beaches, ocean). "
+        "mountain_amp~20 = gentle hills. You pick the seed.\n"
+        "- Prefer fill_cuboid for large volumes, place_block for details.\n"
+        "- Use create_layer to organize (e.g. 'terrain', 'details').\n"
+        "- Block type names are EXACT: oak_log (never 'log'), oak_leaves (never "
+        "'leaves'), oak_planks (never 'planks'), cobblestone (never 'cobble').\n"
+        "- You may create entities and copy_entity them (e.g. trees).\n"
+        "- Do NOT call get_state (too large). Use world_info.\n"
+        "- y = up; ground near y=0; seabed/bedrock below. x,z in [0,95].\n"
+        "- Return ONLY valid JSON, no prose, no markdown fences.\n\n"
+        f"Current state:\n{ctx}"
+    )
+    text = await _call_opencode(system, f"Paint this scene: {prompt}")
+    try:
+        calls = _parse_tool_calls(text)
+    except Exception as e:
+        raise LLMPromptError(f"LLM returned unparseable JSON ({e}); raw: {text[:300]}")
+    if not calls:
+        raise LLMPromptError("LLM returned no tool calls")
+    results: List[Dict[str, Any]] = []
+    for call in calls[:40]:
+        name = call.get("tool") or call.get("name")
+        args = call.get("args") or call.get("arguments") or {}
+        if not name:
+            results.append({"tool": "?", "ok": False, "result": "missing 'tool' key"})
+            continue
+        try:
+            res = await execute_tool_call(str(name), args)
+            ok = not (isinstance(res, dict) and "error" in res)
+            results.append({
+                "tool": str(name),
+                "ok": ok,
+                "result": res if isinstance(res, (dict, list)) else str(res),
+            })
+        except Exception as e:
+            results.append({"tool": str(name), "ok": False,
+                            "result": f"{type(e).__name__}: {e}"})
+    return {
+        "ok": True,
+        "executed": len(results),
+        "results": results,
+        "world": {
+            "blocks": world.block_count,
+            "layers": len(world.layers),
+            "entities": len(world.entities),
+        },
+    }
+
+
+@app.post("/api/prompt")
+async def prompt_api(request: Request) -> Dict[str, Any]:
+    require_auth(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+    prompt = str(body.get("prompt", "")).strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="empty prompt")
+    try:
+        return await run_llm_plan(prompt)
+    except LLMPromptError as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ------------------------------------------------------------------ websocket
 class ConnectionManager:
     def __init__(self) -> None:
         self.connections: Set[WebSocket] = set()
@@ -65,12 +310,13 @@ manager = ConnectionManager()
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
+    if not token_valid(ws.query_params.get("token")):
+        await ws.close(code=4401, reason="unauthorized")
+        return
     await manager.connect(ws)
     try:
-        # Immediately hand the current state to a freshly-connected viewer.
         await ws.send_text(json.dumps(world.to_json()))
         while True:
-            # Viewers are read-only; we only need to keep the socket alive.
             await ws.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(ws)
@@ -78,7 +324,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
         manager.disconnect(ws)
 
 
+# ------------------------------------------- debounced mutation broadcasting
 _main_loop: asyncio.AbstractEventLoop | None = None
+_broadcast_pending = False
 
 
 @app.on_event("startup")
@@ -93,21 +341,33 @@ def _on_mutation() -> None:
     if loop is None:
         return
     try:
-        loop.call_soon_threadsafe(
-            lambda: asyncio.ensure_future(manager.broadcast(world.to_json()))
-        )
+        loop.call_soon_threadsafe(_schedule_broadcast)
     except RuntimeError:
-        pass  # loop already closed; nothing to notify
+        pass
+
+
+def _schedule_broadcast() -> None:
+    global _broadcast_pending
+    if _broadcast_pending:
+        return
+    _broadcast_pending = True
+    asyncio.get_running_loop().call_later(0.3, _flush_broadcast)
+
+
+def _flush_broadcast() -> None:
+    global _broadcast_pending
+    _broadcast_pending = False
+    asyncio.ensure_future(manager.broadcast(world.to_json()))
 
 
 add_mutation_listener(_on_mutation)
 
-# Mount AFTER all routes so / and /ws win; everything else (i.e. /mcp and
-# /mcp/...) falls through to the FastMCP streamable-http app.
+# Mount AFTER all routes so /, /api and /ws win; /mcp falls through to the
+# FastMCP streamable-http app.
 app.mount("/", mcp_app, name="minepaint-mcp")
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8766, log_level="info")
+    uvicorn.run(app, host="127.0.0.1", port=8766, log_level="info")
