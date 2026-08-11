@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>minepaint — 3D voxel canvas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #14141c;
+    --panel: rgba(24, 24, 34, 0.92);
+    --panel-border: #2c2c3e;
+    --accent: #7CBD4B;
+    --text: #d8d8e8;
+    --dim: #8a8aa0;
+    --mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+    --pixel: 'Press Start 2P', var(--mono);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
+  body { font-family: var(--mono); overflow: hidden; }
+  #app { position: fixed; inset: 0; }
+  #canvas-wrap { position: absolute; inset: 0; }
+  canvas { display: block; }
+
+  /* ---------- HUD chrome ---------- */
+  .hud {
+    position: fixed; background: var(--panel); border: 1px solid var(--panel-border);
+    border-radius: 8px; padding: 10px 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.45);
+    z-index: 10; backdrop-filter: blur(4px);
+  }
+  .hud h2 {
+    margin: 0 0 8px 0; font-family: var(--pixel); font-size: 9px; letter-spacing: 1px;
+    color: var(--accent); text-transform: uppercase;
+  }
+
+  /* left: palette legend */
+  #legend { top: 12px; left: 12px; width: 176px; }
+  #legend .palette-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; }
+  .pal-item { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--dim); }
+  .cube {
+    width: 13px; height: 13px; border-radius: 2px; flex: 0 0 auto;
+    box-shadow: inset 0 -4px 0 rgba(0,0,0,0.35), inset 0 3px 0 rgba(255,255,255,0.25);
+    image-rendering: pixelated;
+  }
+
+  /* right: layer panel */
+  #layers { top: 12px; right: 12px; min-width: 180px; max-width: 240px; }
+  .layer-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 11px; }
+  .layer-row input { accent-color: var(--accent); cursor: pointer; }
+  .layer-row .lname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .layer-row .lname.hidden { color: var(--dim); text-decoration: line-through; }
+
+  /* top center: title + camera presets */
+  #topbar { top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 14px; padding: 8px 14px; }
+  #topbar .title { font-family: var(--pixel); font-size: 12px; color: #fff; letter-spacing: 1px; }
+  #topbar .title span { color: var(--accent); }
+  .btn-group { display: flex; gap: 6px; }
+  button.cam {
+    font-family: var(--mono); font-size: 10px; color: var(--text); background: #22222e;
+    border: 1px solid var(--panel-border); border-radius: 5px; padding: 5px 9px; cursor: pointer;
+    transition: all 120ms ease;
+  }
+  button.cam:hover { border-color: var(--accent); color: #fff; }
+  button.cam.active { background: var(--accent); border-color: var(--accent); color: #101018; font-weight: 600; }
+
+  /* bottom center: export + status */
+  #bottom-bar { bottom: 14px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 14px; padding: 8px 16px; }
+  button.export {
+    font-family: var(--pixel); font-size: 10px; color: #101018; background: var(--accent);
+    border: none; border-radius: 5px; padding: 10px 16px; cursor: pointer;
+    box-shadow: 0 3px 0 rgba(0,0,0,0.4); transition: filter 120ms ease, transform 60ms ease;
+  }
+  button.export:hover { filter: brightness(1.1); }
+  button.export:active { transform: translateY(2px); box-shadow: 0 1px 0 rgba(0,0,0,0.4); }
+  #status { display: flex; align-items: center; gap: 7px; font-size: 10px; color: var(--dim); }
+  #status .dot { width: 9px; height: 9px; border-radius: 50%; background: #555; box-shadow: 0 0 6px rgba(0,0,0,0.6); }
+  #status .dot.on { background: #4ade80; box-shadow: 0 0 8px rgba(74,222,128,0.8); }
+  #status .dot.off { background: #f87171; box-shadow: 0 0 8px rgba(248,113,113,0.7); }
+  #status .count { color: var(--text); }
+
+  @media (max-width: 900px) {
+    #legend { display: none; }
+    #topbar .title { font-size: 10px; }
+  }
+</style>
+</head>
+<body>
+  <div id="app">
+    <div id="canvas-wrap"></div>
+  </div>
+
+  <div id="topbar" class="hud">
+    <div class="title">mine<span>paint</span></div>
+    <div class="btn-group">
+      <button class="cam active" data-cam="iso">Isometric</button>
+      <button class="cam" data-cam="top">Top</button>
+      <button class="cam" data-cam="front">Front</button>
+      <button class="cam" data-cam="side">Side</button>
+    </div>
+  </div>
+
+  <div id="legend" class="hud">
+    <h2>Palette</h2>
+    <div id="palette-grid" class="palette-grid"></div>
+  </div>
+
+  <div id="layers" class="hud">
+    <h2>Layers</h2>
+    <div id="layer-list"></div>
+  </div>
+
+  <div id="bottom-bar" class="hud">
+    <button class="export" id="export-btn">Export JPG</button>
+    <div id="status">
+      <span class="dot" id="ws-dot"></span>
+      <span id="ws-label">connecting…</span>
+      <span class="count" id="block-count"></span>
+    </div>
+  </div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ---------- palette (mirrors minepaint/core.py) ----------
+const PALETTE = {
+  grass: '#5B9E3A', dirt: '#8B5A2B', stone: '#7D7D7D', cobblestone: '#6E6E6E',
+  oak_log: '#6B4423', oak_planks: '#A9824B', oak_leaves: '#3A7D28', sand: '#E8D48B',
+  water: '#3B6FD4', glass: '#BFE0FF', brick: '#9C4A3C', snow: '#F0F0F0',
+  lava: '#E8651A', bedrock: '#3A3A3A', gold_ore: '#E0B72C', diamond_ore: '#5FDBD0',
+  netherrack: '#7A2226', cactus: '#2E8B3D'
+};
+const OPAQUE = ['water', 'glass', 'lava'];
+
+const [W, H, D] = [64, 32, 64];
+const CENTER = new THREE.Vector3(W / 2, 8, D / 2);
+
+// ---------- scene setup ----------
+const wrap = document.getElementById('canvas-wrap');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d0d15);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = false;
+wrap.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.copy(CENTER);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.maxPolarAngle = Math.PI;
+
+// lights: warm ambient + strong top light so tops are bright, bottoms dark (Minecraft-y)
+scene.add(new THREE.AmbientLight(0x8a93b8, 0.55));
+const sun = new THREE.DirectionalLight(0xffffff, 1.15);
+sun.position.set(0.5, 1, 0.35);
+scene.add(sun);
+scene.add(new THREE.HemisphereLight(0xbcd0ff, 0x20202a, 0.35));
+
+// faint grid helper on the ground for orientation
+const grid = new THREE.GridHelper(64, 32, 0x33334a, 0x22223a);
+grid.position.set(W / 2, -0.01, D / 2);
+scene.add(grid);
+
+// ---------- world rendering ----------
+let meshes = [];            // InstancedMesh per block type
+let currentWorld = null;    // last world JSON
+const hiddenLayers = new Set();
+
+function makeMaterial(type) {
+  const color = new THREE.Color(PALETTE[type] || '#aaaaaa');
+  if (OPAQUE.includes(type)) {
+    const m = new THREE.MeshLambertMaterial({
+      color, transparent: true,
+      opacity: type === 'glass' ? 0.42 : 0.72,
+      depthWrite: type === 'glass' ? false : true
+    });
+    if (type === 'lava') m.emissive = new THREE.Color(0x401000);
+    return m;
+  }
+  return new THREE.MeshLambertMaterial({ color });
+}
+
+function rebuild() {
+  if (!currentWorld) return;
+  // dispose old
+  for (const mesh of meshes) {
+    mesh.geometry.dispose();
+    mesh.material.dispose();
+    scene.remove(mesh);
+  }
+  meshes = [];
+
+  const layerVisible = new Set();
+  for (const l of currentWorld.layers) {
+    if (l.visible !== false && !hiddenLayers.has(l.id)) layerVisible.add(l.id);
+  }
+
+  const byType = new Map();  // type -> array of [x,y,z]
+  for (const b of currentWorld.blocks) {
+    if (!layerVisible.has(b[4])) continue;
+    if (!byType.has(b[3])) byType.set(b[3], []);
+    byType.get(b[3]).push([b[0], b[1], b[2]]);
+  }
+
+  const dummy = new THREE.Object3D();
+  for (const [type, cells] of byType) {
+    const geo = new THREE.BoxGeometry(1, 1, 1);
+    const mat = makeMaterial(type);
+    const mesh = new THREE.InstancedMesh(geo, mat, cells.length);
+    cells.forEach(([x, y, z], i) => {
+      dummy.position.set(x + 0.5, y + 0.5, z + 0.5);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.frustumCulled = false;
+    scene.add(mesh);
+    meshes.push(mesh);
+  }
+  renderLayers();
+}
+
+// ---------- layer panel ----------
+function renderLayers() {
+  const list = document.getElementById('layer-list');
+  if (!currentWorld) { list.innerHTML = '<div style="font-size:10px;color:var(--dim)">no layers yet</div>'; return; }
+  list.innerHTML = '';
+  const layers = currentWorld.layers.slice().sort((a, b) => (b.order || 0) - (a.order || 0));
+  for (const l of layers) {
+    const row = document.createElement('label');
+    row.className = 'layer-row';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = l.visible !== false && !hiddenLayers.has(l.id);
+    cb.addEventListener('change', () => {
+      if (cb.checked) hiddenLayers.delete(l.id); else hiddenLayers.add(l.id);
+      rebuild();
+    });
+    const name = document.createElement('span');
+    name.className = 'lname' + (cb.checked ? '' : ' hidden');
+    name.textContent = l.name || l.id;
+    row.appendChild(cb);
+    row.appendChild(name);
+    list.appendChild(row);
+  }
+}
+
+// ---------- palette legend ----------
+function renderPalette() {
+  const gridEl = document.getElementById('palette-grid');
+  gridEl.innerHTML = '';
+  for (const [name, color] of Object.entries(PALETTE)) {
+    const item = document.createElement('div');
+    item.className = 'pal-item';
+    const cube = document.createElement('span');
+    cube.className = 'cube';
+    cube.style.background = color;
+    const label = document.createElement('span');
+    label.textContent = name;
+    item.appendChild(cube);
+    item.appendChild(label);
+    gridEl.appendChild(item);
+  }
+}
+renderPalette();
+
+// ---------- camera presets ----------
+const PRESETS = {
+  iso:   { pos: [46, 42, 46], tgt: [W / 2, 8, D / 2] },
+  top:   { pos: [W / 2, 70, D / 2 + 0.01], tgt: [W / 2, 8, D / 2] },
+  front: { pos: [W / 2, 14, 92], tgt: [W / 2, 8, D / 2] },
+  side:  { pos: [92, 14, D / 2], tgt: [W / 2, 8, D / 2] },
+};
+function applyPreset(name) {
+  const p = PRESETS[name];
+  camera.position.set(...p.pos);
+  controls.target.set(...p.tgt);
+  controls.update();
+  document.querySelectorAll('.cam').forEach(b => b.classList.toggle('active', b.dataset.cam === name));
+}
+document.querySelectorAll('.cam').forEach(btn =>
+  btn.addEventListener('click', () => applyPreset(btn.dataset.cam)));
+applyPreset('iso');
+
+// ---------- export JPG (2x supersample) ----------
+document.getElementById('export-btn').addEventListener('click', () => {
+  const prevSize = [renderer.domElement.width, renderer.domElement.height];
+  const prevRatio = renderer.getPixelRatio();
+  const [outW, outH] = [1920, 1080];
+  const hiW = outW * 2, hiH = outH * 2;
+
+  renderer.setPixelRatio(1);
+  renderer.setSize(hiW, hiH, false);
+  camera.aspect = hiW / hiH;
+  camera.updateProjectionMatrix();
+  renderer.render(scene, camera);
+
+  const down = document.createElement('canvas');
+  down.width = outW; down.height = outH;
+  const ctx = down.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(renderer.domElement, 0, 0, outW, outH);
+
+  // restore view
+  renderer.setPixelRatio(prevRatio);
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+
+  const a = document.createElement('a');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  a.href = down.toDataURL('image/jpeg', 0.92);
+  a.download = `minepaint-${stamp}.jpg`;
+  a.click();
+});
+
+// ---------- resize ----------
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ---------- websocket ----------
+const dot = document.getElementById('ws-dot');
+const label = document.getElementById('ws-label');
+const blockCount = document.getElementById('block-count');
+
+function setStatus(state, text) {
+  dot.className = 'dot ' + state;
+  label.textContent = text;
+}
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onopen = () => setStatus('on', 'live');
+  ws.onclose = () => { setStatus('off', 'offline'); setTimeout(connect, 2000); };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (ev) => {
+    try {
+      const data = JSON.parse(ev.data);
+      currentWorld = data;
+      rebuild();
+      renderLayers();
+      const n = data.blocks ? data.blocks.length : 0;
+      blockCount.textContent = n + ' blocks';
+    } catch (e) {
+      console.error('bad ws payload', e);
+    }
+  };
+}
+connect();
+
+// ---------- animate ----------
+renderer.setAnimationLoop(() => {
+  controls.update();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
