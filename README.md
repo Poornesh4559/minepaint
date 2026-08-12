@@ -44,12 +44,15 @@ executed in-process; the world updates live.
 // Claude Desktop: same command/args; or HTTP: url http://127.0.0.1:8766/mcp
 ```
 
-## Tools (19)
+## Tools (25)
 
 | Tool | What it does |
 |---|---|
 | `world_info` / `get_state` | canvas summary / full world JSON (read-back) |
-| `generate_terrain` | **terrain**: ridged mountains, snow caps, rocky slopes, beaches, oceans, meandering river. Tuned recipe: `seed=<n>, sea_level=12, snowline=26, mountain_amp=44` |
+| `generate_terrain` | **terrain** with styles: snowy_mountains, desert, mesa, rolling_hills, river_valley, islands, volcanic, tropical |
+| `get_heights` / `build_road` / `scatter_blocks` / `scatter_trees` | terrain-aware decoration: read ground, height-following paths, scatter cacti/rocks, plant forests (per-tree entities) |
+| `build_object` | **parametric objects**: giant_tree (Avatar-style), rock, arch, boat, tower, mushroom, bridge, cloud, fountain, spike, sphere — every object an entity |
+| `build_shape` | **primitive voxelizer**: compose cylinder/sphere/ellipsoid/box/torus (rotatable, tapered) into ANY object — colosseums, pagodas, moons... |
 | `place_block` / `delete_block` | one block |
 | `fill_cuboid` | fill an inclusive 3D box |
 | `create_layer` / `list_layers` / `set_layer_visible` / `delete_layer` | layered canvas stack |
@@ -60,6 +63,16 @@ executed in-process; the world updates live.
 
 World: **96 × 96 footprint, y from −32 (seabed/bedrock) to +63**. y = up.
 Palette is fixed (18 block types) — the LLM cannot invent block types.
+
+## Example scenes (recipes)
+
+```bash
+PYTHONPATH=$PWD .venv/bin/python scenes/taj_mahal.py        # full-canvas Taj Mahal
+PYTHONPATH=$PWD .venv/bin/python scenes/avatar_forest.py    # 3 home trees + pines + cloud
+PYTHONPATH=$PWD .venv/bin/python scenes/moon_rocket.py      # cratered moon + rocket
+PYTHONPATH=$PWD .venv/bin/python scenes/architecture_demo.py  # colosseum + chinese mansion
+```
+Each rebuilds `data/world.json` (restart the service to see it: `sudo systemctl restart minepaint`).
 
 ## Viewer
 

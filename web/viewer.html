@@ -368,8 +368,9 @@ scene.add(stars);
 
 const ambient = new THREE.AmbientLight(0x8a93b8, 0.7);
 const sun = new THREE.DirectionalLight(0xffa04d, 2.6);
+const moonLight = new THREE.DirectionalLight(0x9db4ff, 0);
 const hemi = new THREE.HemisphereLight(0xbcd0ff, 0x20202a, 0.5);
-scene.add(ambient); scene.add(sun); scene.add(hemi);
+scene.add(ambient); scene.add(sun); scene.add(moonLight); scene.add(hemi);
 sun.target.position.copy(worldMeta.center);
 
 // visible sun + moon discs
@@ -395,6 +396,10 @@ function applyTimeOfDay(hours) {
   const moonPosV = celestialPos((hours + 12) % 24);    // moon: opposite phase
   moonDisc.position.copy(moonPosV);
   moonDisc.visible = -el > -0.04;
+  moonLight.position.copy(moonPosV);
+  moonLight.intensity = THREE.MathUtils.clamp(-el * 3.0, 0, 1.6);
+  moonLight.target.position.copy(worldMeta.center);
+  moonLight.target.updateMatrixWorld();
 
   const warm = THREE.MathUtils.clamp(1 - Math.max(0, el) * 1.4, 0.25, 1);
   sun.color.copy(_c1.set('#ff8c42').lerp(_c2.set('#fff3e0'), 1 - warm));
@@ -406,7 +411,7 @@ function applyTimeOfDay(hours) {
     1 - (Math.max(el, -0.3) + 0.3) / 0.6, 0, 1);   // 0 day, 0.5 twilight, 1 night
   stars.material.opacity = night * 0.9;
 
-  ambient.color.copy(_c1.set('#8a93b8').lerp(_c2.set('#1c2a4a'), night));
+  ambient.color.copy(_c1.set('#a3abc8').lerp(_c2.set('#1c2a4a'), night));
   ambient.intensity = 0.45 + (1 - night) * 0.45;
   hemi.color.copy(_c1.set('#bcd0ff').lerp(_c2.set('#31407a'), night));
   hemi.groundColor.copy(_c1.set('#20202a').lerp(_c2.set('#05070f'), night));
