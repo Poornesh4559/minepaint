@@ -504,6 +504,70 @@ def scatter_trees(tree_type: str = "pine", count: int = 5, x1: int = 0, z1: int 
     return {"trees": len(ids), "blocks": total, "entities": ids}
 
 
+@mcp.tool
+def build_object(kind: str, params: Dict[str, Any], layer_id: Any = None,
+                 entity_name: Optional[str] = None) -> Dict[str, Any]:
+    """Build a named parametric object out of voxels. Becomes an entity (copyable).
+
+    Kinds: giant_tree (Avatar-style: tapered trunk, buttress roots, sweeping
+    branches, layered drooping canopy), rock, arch, boat, tower, mushroom,
+    bridge, cloud, fountain, spike (sharp cone), sphere.
+
+    Every kind needs "position":[x,y,z] (base). Giant tree params:
+    {"position":[48,10,48],"height":38,"trunk_r":5,"roots":6,"branches":8,
+    "canopy_r":12,"trunk_m":"oak_log","canopy_m":"oak_leaves"}. Heights up
+    to ~40 fit the world (y max 63). Others: rock r, arch width/height/
+    thick, tower height/r, mushroom stem_h/cap_r, cloud rx/ry, fountain r,
+    boat length/width/height, spike height/r.
+
+    Example: build_object("giant_tree", {"position":[48,10,48],"height":38}) -> {"blocks": 28000, "entity": "giant_tree_1"}
+    """
+    from minepaint.shapes import build_named_object
+
+    lid = _resolve_layer(layer_id)
+    name = entity_name if isinstance(entity_name, str) and entity_name else f"{kind}_1"
+    eid = world.create_entity(name)
+    try:
+        placed = build_named_object(world, kind, params, lid, eid)
+    except ValueError as e:
+        world.delete_entity(eid)
+        raise WorldError(str(e))
+    _after_mutation()
+    return {"kind": kind, "blocks": placed, "entity": eid}
+
+
+@mcp.tool
+def build_shape(primitives: List[Dict[str, Any]], layer_id: Any = None,
+                entity_name: Optional[str] = None) -> Dict[str, Any]:
+    """Voxelize a composition of primitives into the world. One entity (copyable).
+
+    Each primitive: {"shape": "cylinder|sphere|ellipsoid|box|torus", ...}:
+      cylinder: {"from":[x,y,z],"to":[x,y,z],"r":R,"r2":R2}  (r2=0 = cone)
+      sphere:   {"center":[x,y,z],"r":R}
+      ellipsoid:{"center":[x,y,z],"r":[rx,ry,rz],"rot":[yaw,pitch,roll] deg}
+      box:      {"center":[x,y,z],"r":[hx,hy,hz],"rot":[...]}
+      torus:    {"center":[x,y,z],"R":major,"r":minor}  (flat in XZ)
+    Every primitive takes "m":"block_type". Later primitives overwrite.
+
+    Example (simple tree): [{"shape":"cylinder","from":[10,5,10],"to":[10,12,10],"r":1,"r2":0.8,"m":"oak_log"},{"shape":"sphere","center":[10,15,10],"r":4,"m":"oak_leaves"}]
+    """
+    from minepaint.shapes import voxelize_primitives
+
+    lid = _resolve_layer(layer_id)
+    name = entity_name if isinstance(entity_name, str) and entity_name else "shape_1"
+    eid = world.create_entity(name)
+    if not isinstance(primitives, list) or not primitives:
+        world.delete_entity(eid)
+        raise WorldError("primitives must be a non-empty JSON array")
+    try:
+        placed = voxelize_primitives(world, primitives, lid, eid)
+    except ValueError as e:
+        world.delete_entity(eid)
+        raise WorldError(str(e))
+    _after_mutation()
+    return {"blocks": placed, "entity": eid}
+
+
 async def execute_tool_call(name: str, args: Dict[str, Any]) -> Any:
     """Run an MCP tool in-process (used by the web API's LLM loop)."""
     try:

@@ -176,6 +176,25 @@ async def main() -> int:
             check("terrain extends below y=0", min(y_vals) < 0, f"min_y={min(y_vals)}")
             check("terrain reaches snowline heights", max(y_vals) > 30, f"max_y={max(y_vals)}")
 
+            # parametric objects + primitive voxelizer
+            obj = await call(session, "build_object", kind="giant_tree",
+                             params={"position": [48, 10, 48], "height": 30,
+                                     "trunk_r": 4, "canopy_r": 9})
+            check("build_object giant_tree places blocks",
+                  isinstance(obj.get("blocks"), int) and obj["blocks"] > 4000,
+                  str(obj.get("blocks")))
+            check("giant_tree becomes an entity", bool(obj.get("entity")), str(obj.get("entity")))
+            shp = await call(session, "build_shape", primitives=[
+                {"shape": "cylinder", "from": [10, 5, 10], "to": [10, 12, 10],
+                 "r": 1, "m": "oak_log"},
+                {"shape": "sphere", "center": [10, 15, 10], "r": 3, "m": "oak_leaves"}])
+            check("build_shape composition places blocks",
+                  isinstance(shp.get("blocks"), int) and shp["blocks"] > 100,
+                  str(shp.get("blocks")))
+            check("build_shape creates entity", bool(shp.get("entity")), str(shp.get("entity")))
+            ents = await call(session, "list_entities")
+            check("object entities listed", len(ents) >= 2, str(len(ents)))
+
     print()
     if failures:
         print(f"RESULT: {len(failures)} FAILED")
