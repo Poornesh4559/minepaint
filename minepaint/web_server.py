@@ -80,8 +80,25 @@ def token_valid(tok: Optional[str]) -> bool:
 
 
 # --------------------------------------------------------------------- app
+from contextlib import asynccontextmanager
+
 mcp_app = mcp.http_app(path="/mcp")
-app = FastAPI(title="minepaint", version="2.0.0", lifespan=mcp_app.lifespan)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Run FastMCP's lifespan AND our own startup work.
+
+    Note: passing lifespan= to FastAPI REPLACES the default lifespan, so
+    @app.on_event('startup') hooks would never fire — capture the loop here.
+    """
+    global _main_loop
+    async with mcp_app.lifespan(app):
+        _main_loop = asyncio.get_running_loop()
+        yield
+
+
+app = FastAPI(title="minepaint", version="2.0.0", lifespan=_lifespan)
 
 
 def _extract_token(request: Request) -> Optional[str]:
@@ -210,34 +227,7 @@ def _parse_tool_calls(text: str) -> List[Dict[str, Any]]:
     return data
 
 
-async def run_llm_plan(prompt: str) -> Dict[str, Any]:
-    ctx = await world_summary_for_llm()
-    system = (
-        "You are the painter for 'minepaint', a Minecraft-style 3D voxel canvas.\n"
-        "The user describes a scene; you paint it by replying with ONLY a JSON array "
-        "of tool calls: [{\"tool\": \"name\", \"args\": {...}}, ...].\n"
-        "Rules:\n"
-        "- For landscapes call generate_terrain once. Tuned recipe for dramatic "
-        "snowy mountains + real oceans: snowline=26, sea_level=12, mountain_amp=44 "
-        "(peaks >50 get snow caps, rocky slopes, beaches, ocean). "
-        "mountain_amp~20 = gentle hills. You pick the seed.\n"
-        "- Prefer fill_cuboid for large volumes, place_block for details.\n"
-        "- Use create_layer to organize (e.g. 'terrain', 'details').\n"
-        "- Block type names are EXACT: oak_log (never 'log'), oak_leaves (never "
-        "'leaves'), oak_planks (never 'planks'), cobblestone (never 'cobble').\n"
-        "- You may create entities and copy_entity them (e.g. trees).\n"
-        "- Do NOT call get_state (too large). Use world_info.\n"
-        "- y = up; ground near y=0; seabed/bedrock below. x,z in [0,95].\n"
-        "- Return ONLY valid JSON, no prose, no markdown fences.\n\n"
-        f"Current state:\n{ctx}"
-    )
-    text = await _call_opencode(system, f"Paint this scene: {prompt}")
-    try:
-        calls = _parse_tool_calls(text)
-    except Exception as e:
-        raise LLMPromptError(f"LLM returned unparseable JSON ({e}); raw: {text[:300]}")
-    if not calls:
-        raise LLMPromptError("LLM returned no tool calls")
+async def _execute_calls(calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
     for call in calls[:40]:
         name = call.get("tool") or call.get("name")
@@ -256,6 +246,60 @@ async def run_llm_plan(prompt: str) -> Dict[str, Any]:
         except Exception as e:
             results.append({"tool": str(name), "ok": False,
                             "result": f"{type(e).__name__}: {e}"})
+    return results
+
+
+async def run_llm_plan(prompt: str) -> Dict[str, Any]:
+    ctx = await world_summary_for_llm()
+    system = (
+        "You are the painter for 'minepaint', a Minecraft-style 3D voxel canvas.\n"
+        "The user describes a scene; you paint it by replying with ONLY a JSON array "
+        "of tool calls: [{\"tool\": \"name\", \"args\": {...}}, ...].\n"
+        "Rules:\n"
+        "- For landscapes call generate_terrain once. Tuned recipe for dramatic "
+        "snowy mountains + real oceans: snowline=26, sea_level=12, mountain_amp=44 "
+        "(peaks >50 get snow caps, rocky slopes, beaches, ocean). "
+        "mountain_amp~20 = gentle hills. You pick the seed.\n"
+        "- generate_terrain param ranges: seed=any int, sea_level 1..40 (12=ocean), "
+        "snowline 1..55 (26=snow caps), mountain_amp 10..80 (44=dramatic). "
+        "Out-of-range values get clamped, not errors.\n"
+        "- Prefer fill_cuboid for large volumes, place_block for details.\n"
+        "- Use create_layer to organize (e.g. 'terrain', 'details').\n"
+        "- Block type names are EXACT: oak_log (never 'log'), oak_leaves (never "
+        "'leaves'), oak_planks (never 'planks'), cobblestone (never 'cobble').\n"
+        "- You may create entities and copy_entity them (e.g. trees).\n"
+        "- Do NOT call get_state (too large). Use world_info.\n"
+        "- y = up; ground near y=0; seabed/bedrock below. x,z in [0,95].\n"
+        "- Return ONLY valid JSON, no prose, no markdown fences.\n\n"
+        f"Current state:\n{ctx}"
+    )
+    text = await _call_opencode(system, f"Paint this scene: {prompt}")
+    try:
+        calls = _parse_tool_calls(text)
+    except Exception as e:
+        raise LLMPromptError(f"LLM returned unparseable JSON ({e}); raw: {text[:300]}")
+    if not calls:
+        raise LLMPromptError("LLM returned no tool calls")
+
+    results = await _execute_calls(calls)
+
+    # one corrective round: send failures back so the LLM can fix its plan
+    failed = [r for r in results if not r["ok"]]
+    if failed and len(failed) <= 6:
+        feedback = "\n".join(f"- {r['tool']} failed: {str(r['result'])[:200]}" for r in failed)
+        try:
+            retry_text = await _call_opencode(
+                system,
+                f"Paint this scene: {prompt}\n\nYour previous plan had failing calls:\n"
+                f"{feedback}\nFix ONLY those calls (keep the successful ones). "
+                "Return ONLY the JSON array of corrected tool calls.",
+            )
+            retry_calls = _parse_tool_calls(retry_text)
+            retry_results = await _execute_calls(retry_calls)
+            results = [r for r in results if r["ok"]] + retry_results
+        except Exception:
+            pass  # keep first-round results
+
     return {
         "ok": True,
         "executed": len(results),
@@ -350,19 +394,17 @@ _main_loop: asyncio.AbstractEventLoop | None = None
 _broadcast_pending = False
 
 
-@app.on_event("startup")
-async def _capture_loop() -> None:
-    global _main_loop
-    _main_loop = asyncio.get_running_loop()
-
-
 def _on_mutation() -> None:
     """Called synchronously (possibly from a worker thread) after each mutation."""
-    loop = _main_loop
-    if loop is None:
-        return
+    global _main_loop
+    if _main_loop is None:
+        # lazily grab the running loop (also covers startup-order edge cases)
+        try:
+            _main_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
     try:
-        loop.call_soon_threadsafe(_schedule_broadcast)
+        _main_loop.call_soon_threadsafe(_schedule_broadcast)
     except RuntimeError:
         pass
 

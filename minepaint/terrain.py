@@ -11,7 +11,7 @@ import math
 import random
 from typing import Dict, Optional, Tuple
 
-from minepaint.core import W, H, D, Y_MIN, PALETTE
+from minepaint.core import W, H, D, Y_MIN, Y_MAX, PALETTE
 
 SEA_LEVEL_DEFAULT = 7
 SNOWLINE_DEFAULT = 38
@@ -90,10 +90,12 @@ def generate(world, seed: int = 1, *, sea_level: int = SEA_LEVEL_DEFAULT,
     """
     if rockline is None:
         rockline = snowline - 6
-    if not (Y_MIN <= sea_level <= 40):
-        raise ValueError(f"sea_level must be in [{Y_MIN}, 40], got {sea_level}")
-    if not (Y_MIN <= snowline <= 55):
-        raise ValueError(f"snowline must be in [{Y_MIN}, 55], got {snowline}")
+    # clamp (not reject) out-of-range params — LLMs pick weird values; a
+    # clamped landscape beats a refused one
+    sea_level = min(40, max(Y_MIN, int(sea_level)))
+    snowline = min(55, max(Y_MIN, int(snowline)))
+    mountain_amp = min(80.0, max(10.0, float(mountain_amp)))
+    rockline = min(snowline - 1, max(Y_MIN, int(rockline)))
 
     # --- heightmap ---------------------------------------------------------
     heights: Dict[Tuple[int, int], float] = {}
@@ -139,7 +141,8 @@ def generate(world, seed: int = 1, *, sea_level: int = SEA_LEVEL_DEFAULT,
     for x in range(W):
         for z in range(D):
             h = int(round(heights[(x, z)]))
-            h = max(h, Y_MIN + 1)
+            # clamp to the world box (extreme amp can push past the ceiling)
+            h = min(max(h, Y_MIN + 1), Y_MAX)
             under_water = h < sea_level
             bottom = max(Y_MIN, h - CRUST)
             # column fill (crust only)
