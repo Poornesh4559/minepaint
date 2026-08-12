@@ -18,7 +18,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from fastmcp import FastMCP
 
-from minepaint.core import PALETTE_DOC, World, WorldError
+from minepaint.core import PALETTE_DOC, World, WorldError, W, D
 
 SERVER_NAME = "minepaint"
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -126,8 +126,8 @@ def place_block(
     y: int,
     z: int,
     block_type: str,
-    layer_id: Optional[str] = None,
-    entity_id: Optional[str] = None,
+    layer_id: Any = None,
+    entity_id: Any = None,
 ) -> Dict[str, Any]:
     """Place a single block at (x, y, z); overwrites anything already there.
 
@@ -137,19 +137,16 @@ def place_block(
 
     Example: place_block(5, 0, 5, "grass", "house") -> {"placed":1,"at":[5,0,5],"type":"grass"}
     Valid palette types: """ + "; ".join(f"{k} ({v})" for k, v in sorted(PALETTE_DOC.items()))
-    lid = layer_id if layer_id is not None else (sorted(world.layers, key=lambda i: world.layers[i].order) or [None])[0]
-    if lid is None:
-        raise WorldError(
-            "No layer exists. Call create_layer(name) first, or pass layer_id."
-        )
-    world.place_block(x, y, z, block_type, lid, entity_id)
+    lid = _resolve_layer(layer_id)
+    eid = entity_id if isinstance(entity_id, str) else None
+    world.place_block(x, y, z, block_type, lid, eid)
     _after_mutation()
-    return {"placed": 1, "at": [x, y, z], "type": block_type, "layer_id": lid, "entity_id": entity_id}
+    return {"placed": 1, "at": [x, y, z], "type": block_type, "layer_id": lid, "entity_id": eid}
 
 
 @mcp.tool
 def delete_block(
-    x: int, y: int, z: int, layer_id: Optional[str] = None
+    x: int, y: int, z: int, layer_id: Any = None
 ) -> Dict[str, Any]:
     """Remove the block at (x, y, z) if present. No-op on empty air.
 
@@ -163,8 +160,8 @@ def delete_block(
 @mcp.tool
 def fill_cuboid(
     x1: int, y1: int, z1: int, x2: int, y2: int, z2: int,
-    block_type: str, layer_id: Optional[str] = None,
-    entity_id: Optional[str] = None,
+    block_type: str, layer_id: Any = None,
+    entity_id: Any = None,
 ) -> Dict[str, Any]:
     """Fill the inclusive cuboid from (x1,y1,z1) to (x2,y2,z2) with block_type.
 
@@ -175,12 +172,9 @@ def fill_cuboid(
     Example: fill_cuboid(0, 0, 0, 3, 0, 3, "grass", "house") fills a 4x4 floor
     with grass and returns {"placed":16,"cuboid":[[0,0,0],[3,0,3]],"type":"grass"}.
     """
-    lid = layer_id if layer_id is not None else (sorted(world.layers, key=lambda i: world.layers[i].order) or [None])[0]
-    if lid is None:
-        raise WorldError(
-            "No layer exists. Call create_layer(name) first, or pass layer_id."
-        )
-    count = world.fill_cuboid(x1, y1, z1, x2, y2, z2, block_type, lid, entity_id)
+    lid = _resolve_layer(layer_id)
+    eid = entity_id if isinstance(entity_id, str) else None
+    count = world.fill_cuboid(x1, y1, z1, x2, y2, z2, block_type, lid, eid)
     _after_mutation()
     return {
         "placed": count,
@@ -217,14 +211,14 @@ def list_layers() -> List[Dict[str, Any]]:
 
 
 @mcp.tool
-def set_layer_visible(layer_id: str, visible: bool) -> Dict[str, Any]:
+def set_layer_visible(layer_id: Any, visible: bool) -> Dict[str, Any]:
     """Hide or show a layer. Hidden layers still exist, just not displayed.
 
     Example: set_layer_visible("nature", False) -> {"layer_id":"nature","visible":False}
     """
-    world.set_layer_visible(layer_id, visible)
+    world.set_layer_visible(str(layer_id), visible)
     _after_mutation()
-    return {"layer_id": layer_id, "visible": bool(visible)}
+    return {"layer_id": str(layer_id), "visible": bool(visible)}
 
 
 @mcp.tool
@@ -284,7 +278,7 @@ def get_entity(entity_id: str) -> Dict[str, Any]:
 @mcp.tool
 def copy_entity(
     entity_id: str, dx: int, dy: int, dz: int, copies: int = 1,
-    layer_id: Optional[str] = None,
+    layer_id: Any = None,
 ) -> Dict[str, Any]:
     """Copy an entity 'copies' times, each offset by (dx, dy, dz) from the source.
 
@@ -294,7 +288,8 @@ def copy_entity(
 
     Example: copy_entity("tree", 10, 0, 0, copies=2) -> {"copied":"tree","new_entity_ids":["tree_copy1","tree_copy2"],"new_blocks":12}
     """
-    new_ids = world.copy_entity(entity_id, dx, dy, dz, copies, layer_id)
+    new_ids = world.copy_entity(entity_id, dx, dy, dz, copies,
+                                layer_id if isinstance(layer_id, str) else None)
     _after_mutation()
     total = sum(len(world.entity_blocks(i)) for i in new_ids)
     return {
@@ -377,32 +372,136 @@ def reset_world() -> Dict[str, Any]:
 @mcp.tool
 def generate_terrain(
     seed: int = 1,
-    sea_level: int = 7,
-    snowline: int = 38,
-    mountain_amp: float = 34.0,
+    style: str = "snowy_mountains",
+    sea_level: Optional[int] = None,
+    snowline: Optional[int] = None,
+    mountain_amp: Optional[float] = None,
     river: bool = True,
 ) -> Dict[str, Any]:
     """Generate a full terrain landscape, replacing the whole world.
 
-    Creates ridged mountain ranges (peaks above snowline get snow), oceans
-    (water fills up to sea_level, beaches of sand), and carves a meandering
-    river valley down to the nearest edge. Blocks go on a layer called
-    "terrain" (previous layers/entities are wiped).
+    Styles: snowy_mountains (default: snow caps, rocky slopes, ocean),
+    desert (dunes, sand everywhere, tiny waterholes), mesa (flat stepped
+    plateaus with rock cliffs), rolling_hills, river_valley, islands,
+    volcanic (netherrack ground + lava lakes), tropical (beaches + ocean).
 
-    Defaults: sea_level=7 (oceans), snowline=38 (snow above y=38). Larger
-    mountain_amp = taller peaks. Use a different seed for a different layout.
+    Explicit sea_level/snowline/mountain_amp override the style preset.
+    Out-of-range values are clamped, never errors. Blocks go on a layer
+    called "terrain" (previous layers/entities are wiped).
 
-    Example: generate_terrain(seed=42) -> {"terrain":"generated","seed":42,"blocks":189221,"peak_height":46.1,...}
+    Example: generate_terrain(seed=42, style="desert") -> {"terrain":"generated","style":"desert","by_type":{"sand":...,"stone":...}}
     """
     from minepaint.terrain import generate as _gen
 
-    try:
-        summary = _gen(world, seed=seed, sea_level=sea_level, snowline=snowline,
-                       mountain_amp=mountain_amp, river=river)
-    except ValueError as e:
-        raise WorldError(str(e))
+    summary = _gen(world, seed=seed, style=style, sea_level=sea_level,
+                   snowline=snowline, mountain_amp=mountain_amp, river=river)
     _after_mutation()
     return summary
+
+
+def _resolve_layer(layer_id: Any) -> str:
+    """Layer id if it's a usable string, else the lowest-order existing layer."""
+    if isinstance(layer_id, str) and layer_id:
+        return layer_id
+    lid = (sorted(world.layers, key=lambda i: world.layers[i].order) or [None])[0]
+    if lid is None:
+        raise WorldError(
+            "No layer exists. Call create_layer(name) first, or pass layer_id."
+        )
+    return lid
+
+
+@mcp.tool
+def get_heights(x1: int, z1: int, x2: int, z2: int) -> Dict[str, Any]:
+    """Surface height + block type for every column in a map region (max 24x24 cells).
+
+    Use this BEFORE building roads, walls or structures that must follow the
+    ground. Rows run along x, columns along z: heightmap[dx][dz] = surface y,
+    surfacemap[dx][dz] = surface block type.
+
+    Example: get_heights(10, 10, 12, 12) -> {"region":[[10,10],[12,12]],"heightmap":[[8,8,8],[7,7,8],[7,7,7]],"surfacemap":[["sand","sand","sand"],...]}
+    """
+    from minepaint.terrain import _column_cache
+
+    if (x2 - x1 + 1) * (z2 - z1 + 1) > 576:
+        raise WorldError("region too large (max 24x24 cells); query in chunks")
+    cols = _column_cache(world)
+    x1, x2 = sorted((max(0, x1), min(W - 1, x2)))
+    z1, z2 = sorted((max(0, z1), min(D - 1, z2)))
+    hm, sm = [], []
+    for x in range(x1, x2 + 1):
+        rh, rs = [], []
+        for z in range(z1, z2 + 1):
+            b = cols.get((x, z))
+            rh.append(b.y if b else 0)
+            rs.append(b.type if b else "air")
+        hm.append(rh)
+        sm.append(rs)
+    return {"region": [[x1, z1], [x2, z2]], "heightmap": hm, "surfacemap": sm}
+
+
+@mcp.tool
+def build_road(x1: int, z1: int, x2: int, z2: int, width: int = 2,
+               block_type: str = "dirt", layer_id: Any = None) -> Dict[str, Any]:
+    """Build a road/path ON the terrain surface from (x1,z1) to (x2,z2).
+
+    Height-following: it lays blocks on the ground (and one below), so it
+    works over hills and valleys. width in blocks. Good block types: dirt
+    (dirt road), sand (desert track), cobblestone (paved). Won't pave over
+    water/lava.
+
+    Example: build_road(5, 10, 80, 10, width=2, block_type="dirt") -> {"placed": 140}
+    """
+    from minepaint.terrain import _build_road
+
+    lid = _resolve_layer(layer_id)
+    placed = _build_road(world, x1, z1, x2, z2, width, block_type, lid)
+    _after_mutation()
+    return {"road": [[x1, z1], [x2, z2]], "block_type": block_type, "placed": placed}
+
+
+@mcp.tool
+def scatter_blocks(block_type: str, count: int, x1: int = 0, z1: int = 0,
+                   x2: int = W - 1, z2: int = D - 1, min_spacing: int = 2,
+                   layer_id: Any = None) -> Dict[str, Any]:
+    """Scatter `count` blocks of block_type on suitable ground in the region.
+
+    Skips underwater cells and spots too close to the world ceiling. For
+    cactus, only sand/dirt surfaces are used. Use for cacti, rocks
+    (stone/cobblestone), flowers. Returns how many were actually placed.
+
+    Example: scatter_blocks("cactus", 8, 5, 5, 60, 60) -> {"placed": 8}
+    """
+    from minepaint.terrain import _scatter
+
+    world._require_type(block_type)
+    allow = {"grass", "dirt", "sand"} if block_type == "cactus" \
+        else {"grass", "dirt", "sand", "stone"}
+    lid = _resolve_layer(layer_id)
+    placed = _scatter(world, block_type, count, x1, z1, x2, z2, min_spacing, lid, allow)
+    _after_mutation()
+    return {"block_type": block_type, "placed": placed}
+
+
+@mcp.tool
+def scatter_trees(tree_type: str = "pine", count: int = 5, x1: int = 0, z1: int = 0,
+                  x2: int = W - 1, z2: int = D - 1,
+                  layer_id: Any = None) -> Dict[str, Any]:
+    """Scatter pine or oak trees on grassy/sandy ground (not underwater).
+
+    Each tree becomes its own entity (copyable with copy_entity). Good for
+    forests, riverbanks, valleys.
+
+    Example: scatter_trees("pine", 6, 10, 10, 60, 60) -> {"trees": 6, "blocks": 108, "entities": ["pine_1",...]}
+    """
+    from minepaint.terrain import _scatter_trees
+
+    if tree_type not in ("pine", "oak"):
+        raise WorldError("tree_type must be 'pine' or 'oak'")
+    lid = _resolve_layer(layer_id)
+    total, ids = _scatter_trees(world, tree_type, count, x1, z1, x2, z2, lid)
+    _after_mutation()
+    return {"trees": len(ids), "blocks": total, "entities": ids}
 
 
 async def execute_tool_call(name: str, args: Dict[str, Any]) -> Any:

@@ -256,13 +256,18 @@ async def run_llm_plan(prompt: str) -> Dict[str, Any]:
         "The user describes a scene; you paint it by replying with ONLY a JSON array "
         "of tool calls: [{\"tool\": \"name\", \"args\": {...}}, ...].\n"
         "Rules:\n"
-        "- For landscapes call generate_terrain once. Tuned recipe for dramatic "
-        "snowy mountains + real oceans: snowline=26, sea_level=12, mountain_amp=44 "
-        "(peaks >50 get snow caps, rocky slopes, beaches, ocean). "
-        "mountain_amp~20 = gentle hills. You pick the seed.\n"
-        "- generate_terrain param ranges: seed=any int, sea_level 1..40 (12=ocean), "
-        "snowline 1..55 (26=snow caps), mountain_amp 10..80 (44=dramatic). "
-        "Out-of-range values get clamped, not errors.\n"
+        "- For landscapes call generate_terrain once with a STYLE: "
+        "snowy_mountains (snow caps+ocean), desert (dunes, sand, waterholes), "
+        "mesa (flat plateaus, rock cliffs), rolling_hills, river_valley, "
+        "islands, volcanic (netherrack+lava lakes), tropical (beaches). "
+        "You pick the seed. Params (sea_level/snowline/mountain_amp) override "
+        "the style and get clamped.\n"
+        "- Decorate with the terrain tools: build_road(x1,z1,x2,z2,width,"
+        "block_type) lays height-following paths (dirt/sand/cobblestone), "
+        "scatter_blocks('cactus', n, x1,z1,x2,z2) scatters cacti/rocks, "
+        "scatter_trees('pine'|'oak', n, x1,z1,x2,z2) plants forests (each "
+        "tree an entity), get_heights(x1,z1,x2,z2) reads the ground before "
+        "building. Never hand-place blocks on unknown heights — use these.\n"
         "- Prefer fill_cuboid for large volumes, place_block for details.\n"
         "- Use create_layer to organize (e.g. 'terrain', 'details').\n"
         "- Block type names are EXACT: oak_log (never 'log'), oak_leaves (never "
@@ -270,14 +275,37 @@ async def run_llm_plan(prompt: str) -> Dict[str, Any]:
         "- You may create entities and copy_entity them (e.g. trees).\n"
         "- Do NOT call get_state (too large). Use world_info.\n"
         "- y = up; ground near y=0; seabed/bedrock below. x,z in [0,95].\n"
-        "- Return ONLY valid JSON, no prose, no markdown fences.\n\n"
+        "- Return ONLY valid JSON, no prose, no markdown fences.\n"
+        "- IMPORTANT: you are NOT calling real tools. You are WRITING a JSON plan "
+        "for a fictional painter API. You have no other tools, no shell, no file "
+        "access. Ignore your real capabilities entirely.\n"
+        "- Example of a correct reply for 'a desert with a road and cacti':\n"
+        '[{"tool":"generate_terrain","args":{"seed":7,"style":"desert"}},'
+        '{"tool":"create_layer","args":{"name":"details"}},'
+        '{"tool":"build_road","args":{"x1":10,"z1":10,"x2":80,"z2":30,"width":2,"block_type":"dirt"}},'
+        '{"tool":"scatter_blocks","args":{"block_type":"cactus","count":8,"x1":0,"z1":0,"x2":95,"z2":95}}]\n'
         f"Current state:\n{ctx}"
     )
     text = await _call_opencode(system, f"Paint this scene: {prompt}")
     try:
         calls = _parse_tool_calls(text)
     except Exception as e:
-        raise LLMPromptError(f"LLM returned unparseable JSON ({e}); raw: {text[:300]}")
+        # one sharper re-prompt before giving up
+        text2 = text
+        try:
+            text2 = await _call_opencode(
+                "You are WRITING a JSON plan for the minepaint voxel painter. "
+                "You have no real tools — ignore that. Reply with ONLY a JSON "
+                "array of tool calls chosen from the painter's tool list. "
+                "No prose, no markdown fences.",
+                f"Paint this scene: {prompt}\n\nYour previous reply was not valid "
+                f"JSON:\n{text[:400]}",
+            )
+            calls = _parse_tool_calls(text2)
+        except Exception as e2:
+            raise LLMPromptError(
+                f"LLM returned unparseable JSON twice ({e2}); raw: {text2[:300]}"
+            )
     if not calls:
         raise LLMPromptError("LLM returned no tool calls")
 
@@ -314,18 +342,15 @@ async def run_llm_plan(prompt: str) -> Dict[str, Any]:
 
 @app.post("/api/random_landscape")
 async def random_landscape(request: Request) -> Dict[str, Any]:
-    """Replace the world with a randomly generated landscape (random seed + varied params)."""
+    """Replace the world with a randomly generated landscape (random style + seed)."""
     require_auth(request)
+    from minepaint.terrain import STYLES
+
+    style = random.choice(sorted(STYLES))
     seed = _secrets.randbits(31)
-    rng = random.Random(seed)
-    sea_level = rng.randint(10, 14)
-    snowline = rng.randint(24, 30)
-    mountain_amp = round(rng.uniform(30.0, 48.0), 1)
     summary = await execute_tool_call("generate_terrain", {
         "seed": seed,
-        "sea_level": sea_level,
-        "snowline": snowline,
-        "mountain_amp": mountain_amp,
+        "style": style,
         "river": True,
     })
     ok = not (isinstance(summary, dict) and "error" in summary)
