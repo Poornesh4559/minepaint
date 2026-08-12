@@ -400,8 +400,12 @@ def generate_terrain(
 
 
 def _resolve_layer(layer_id: Any) -> str:
-    """Layer id if it's a usable string, else the lowest-order existing layer."""
+    """Layer id if usable, else the lowest-order existing layer. Missing named
+    layers are auto-created (LLMs often invent layer names — be forgiving)."""
     if isinstance(layer_id, str) and layer_id:
+        if layer_id in world.layers:
+            return layer_id
+        world.create_layer(layer_id)
         return layer_id
     lid = (sorted(world.layers, key=lambda i: world.layers[i].order) or [None])[0]
     if lid is None:
@@ -525,6 +529,19 @@ def build_object(kind: str, params: Dict[str, Any], layer_id: Any = None,
     from minepaint.shapes import build_named_object
 
     lid = _resolve_layer(layer_id)
+    if not isinstance(params, dict):
+        raise WorldError("params must be a JSON object")
+    pos = params.get("position")
+    if not (isinstance(pos, list) and len(pos) == 3):
+        # auto-position at world center on the surface (LLM-friendly fallback)
+        from minepaint.terrain import _column_cache
+        cols = _column_cache(world)
+        b = cols.get((W // 2, D // 2))
+        auto_y = (b.y + 1) if b else 0
+        params = {**params, "position": [W // 2, auto_y, D // 2]}
+        auto_note = f" (position auto-set to [{W // 2}, {auto_y}, {D // 2}] — surface at world center)"
+    else:
+        auto_note = ""
     name = entity_name if isinstance(entity_name, str) and entity_name else f"{kind}_1"
     eid = world.create_entity(name)
     try:
@@ -533,7 +550,7 @@ def build_object(kind: str, params: Dict[str, Any], layer_id: Any = None,
         world.delete_entity(eid)
         raise WorldError(str(e))
     _after_mutation()
-    return {"kind": kind, "blocks": placed, "entity": eid}
+    return {"kind": kind, "blocks": placed, "entity": eid, "position": [int(v) for v in params["position"]], "note": auto_note}
 
 
 @mcp.tool

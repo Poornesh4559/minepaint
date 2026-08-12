@@ -227,14 +227,22 @@ def _parse_tool_calls(text: str) -> List[Dict[str, Any]]:
     return data
 
 
-async def _execute_calls(calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+async def _execute_calls(calls: List[Dict[str, Any]], state: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
+    if state is None:
+        state = {"terrain_done": False}
     for call in calls[:40]:
         name = call.get("tool") or call.get("name")
         args = call.get("args") or call.get("arguments") or {}
         if not name:
             results.append({"tool": "?", "ok": False, "result": "missing 'tool' key"})
             continue
+        if name == "generate_terrain" and state["terrain_done"]:
+            results.append({"tool": name, "ok": True,
+                            "result": "terrain already generated this run — skipping duplicate call"})
+            continue
+        if name == "generate_terrain":
+            state["terrain_done"] = True
         try:
             res = await execute_tool_call(str(name), args)
             ok = not (isinstance(res, dict) and "error" in res)
@@ -270,8 +278,9 @@ async def run_llm_plan(prompt: str) -> Dict[str, Any]:
         "building. Never hand-place blocks on unknown heights — use these.\n"
         "- For structures and ORGANIC objects use build_object(kind, params): "
         "giant_tree (Avatar-style: tapered trunk, buttress roots, sweeping "
-        "branches, layered canopy), rock, arch, boat, tower, mushroom, "
-        "bridge, cloud, fountain, spike, sphere. Every object is an entity — "
+        "branches, layered canopy), duck (giant rubber-duck toy, yellow, "
+        "swimming), rock, arch, boat, tower, mushroom, bridge, cloud, "
+        "fountain, spike, sphere. Every object is an entity — "
         "copy_entity it to duplicate (e.g. 3 giant trees around a valley).\n"
         "- For custom shapes use build_shape([{shape,from,to,r,m},...]) — "
         "cylinder/sphere/ellipsoid/box/torus compositions, voxelized for you. "
@@ -320,7 +329,8 @@ async def run_llm_plan(prompt: str) -> Dict[str, Any]:
     if not calls:
         raise LLMPromptError("LLM returned no tool calls")
 
-    results = await _execute_calls(calls)
+    state = {"terrain_done": False}
+    results = await _execute_calls(calls, state)
 
     # one corrective round: send failures back so the LLM can fix its plan
     failed = [r for r in results if not r["ok"]]
@@ -334,7 +344,7 @@ async def run_llm_plan(prompt: str) -> Dict[str, Any]:
                 "Return ONLY the JSON array of corrected tool calls.",
             )
             retry_calls = _parse_tool_calls(retry_text)
-            retry_results = await _execute_calls(retry_calls)
+            retry_results = await _execute_calls(retry_calls, state)
             results = [r for r in results if r["ok"]] + retry_results
         except Exception:
             pass  # keep first-round results

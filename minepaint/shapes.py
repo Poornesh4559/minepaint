@@ -154,12 +154,57 @@ def _voxelize_prim(world, prim: Dict[str, Any], layer: str, eid: str) -> int:
     return count
 
 
+def _validate_prim(prim: Dict[str, Any]) -> None:
+    """Check required keys with a clear error (LLMs need actionable messages)."""
+    if not isinstance(prim, dict):
+        raise ValueError(f"each primitive must be an object, got {type(prim).__name__}")
+    kind = prim.get("shape")
+    if kind not in ("cylinder", "sphere", "ellipsoid", "box", "torus"):
+        raise ValueError(
+            f"unknown shape {kind!r}; use cylinder|sphere|ellipsoid|box|torus"
+        )
+    if kind == "cylinder":
+        for k in ("from", "to", "r"):
+            if k not in prim:
+                raise ValueError(
+                    f"cylinder primitive is missing '{k}' — need from, to and r "
+                    f"(r2 optional). Got keys: {sorted(prim)}"
+                )
+    elif kind == "sphere":
+        for k in ("center", "r"):
+            if k not in prim:
+                raise ValueError(
+                    f"sphere primitive is missing '{k}' — need center:[x,y,z] "
+                    f"and r. Got keys: {sorted(prim)}"
+                )
+    elif kind in ("ellipsoid", "box"):
+        for k in ("center", "r"):
+            if k not in prim:
+                raise ValueError(
+                    f"{kind} primitive is missing '{k}' — need center:[x,y,z] "
+                    f"and r:[rx,ry,rz]. Got keys: {sorted(prim)}"
+                )
+    elif kind == "torus":
+        for k in ("center", "R", "r"):
+            if k not in prim:
+                raise ValueError(
+                    f"torus primitive is missing '{k}' — need center, R (major) "
+                    f"and r (minor). Got keys: {sorted(prim)}"
+                )
+
+
 def voxelize_primitives(world, primitives: List[Dict[str, Any]], layer: str,
                         eid: str) -> int:
     """Voxelize a composition of primitives (later ones overwrite earlier)."""
     placed = 0
-    for prim in primitives:
-        placed += _voxelize_prim(world, prim, layer, eid)
+    for i, prim in enumerate(primitives):
+        _validate_prim(prim)
+        try:
+            placed += _voxelize_prim(world, prim, layer, eid)
+        except (KeyError, TypeError, ValueError) as e:
+            raise ValueError(
+                f"bad primitive #{i + 1} ({prim.get('shape')}): {e}"
+            )
     return placed
 
 
@@ -359,6 +404,31 @@ def _named_ball(p: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [{"shape": "sphere", "center": [x, y, z], "r": p.get("r", 4), "m": p.get("m", "stone")}]
 
 
+def _named_duck(p: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Giant rubber-duck toy, facing +x. Yellow body (gold_ore), brick beak."""
+    x, y, z = p["position"]
+    s = float(p.get("scale", 1.0))
+    yellow = "gold_ore"
+    prims = [
+        # body (floats — center sits near the waterline)
+        {"shape": "ellipsoid", "center": [x, y + 10 * s, z],
+         "r": [16 * s, 11 * s, 12 * s], "m": yellow},
+        # tail flick
+        {"shape": "cylinder", "from": [x - 13 * s, y + 8 * s, z],
+         "to": [x - 19 * s, y + 14 * s, z], "r": 3.5 * s, "r2": 0.5 * s, "m": yellow},
+        # head
+        {"shape": "sphere", "center": [x + 10 * s, y + 20 * s, z + 4 * s],
+         "r": 7 * s, "m": yellow},
+        # beak
+        {"shape": "box", "center": [x + 17 * s, y + 19 * s, z + 4 * s],
+         "r": [3.5 * s, 1.6 * s, 1.6 * s], "m": "brick"},
+        # eye
+        {"shape": "sphere", "center": [x + 12.5 * s, y + 22.5 * s, z + 6.8 * s],
+         "r": 1.3 * s, "m": "bedrock"},
+    ]
+    return prims
+
+
 NAMED_OBJECTS: Dict[str, Any] = {
     "giant_tree": _named_giant_tree,
     "rock": _named_rock,
@@ -371,6 +441,7 @@ NAMED_OBJECTS: Dict[str, Any] = {
     "fountain": _named_fountain,
     "spike": _named_spike,
     "sphere": _named_ball,
+    "duck": _named_duck,
 }
 
 
