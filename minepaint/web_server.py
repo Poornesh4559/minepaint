@@ -59,7 +59,10 @@ def _load_secrets() -> Dict[str, str]:
 
 
 def _ensure_token(env: Dict[str, str]) -> str:
-    tok = env.get("MINEPAINT_TOKEN")
+    # env var wins (e.g. systemd-managed deployments), then ~/.hermes/.env.
+    # Previously the env var was silently ignored and a random token was
+    # generated, breaking deployments that set MINEPAINT_TOKEN externally.
+    tok = os.environ.get("MINEPAINT_TOKEN") or env.get("MINEPAINT_TOKEN")
     if not tok:
         tok = _secrets.token_hex(24)
         with open(SECRETS_FILE, "a", encoding="utf-8") as f:

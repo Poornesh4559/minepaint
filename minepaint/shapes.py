@@ -139,6 +139,14 @@ def _voxelize_prim(world, prim: Dict[str, Any], layer: str, eid: str) -> int:
     x0, x1 = max(0, x0), min(W - 1, x1)
     z0, z1 = max(0, z0), min(D - 1, z1)
     y0, y1 = max(Y_MIN, y0), min(Y_MAX, y1)
+    # Pre-check the iteration volume BEFORE placing anything: an oversized
+    # primitive previously destroyed existing terrain block-by-block and only
+    # raised mid-way, so a failed call left the overwritten cells gone.
+    vol = (x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1)
+    if vol > MAX_BLOCKS_PER_CALL:
+        raise ValueError(
+            f"object exceeds {MAX_BLOCKS_PER_CALL} blocks (bbox volume {vol}); reduce sizes"
+        )
     mat = prim.get("m", "stone")
     count = 0
     for x in range(x0, x1 + 1):
@@ -192,6 +200,29 @@ def _validate_prim(prim: Dict[str, Any]) -> None:
                     f"and r (minor). Got keys: {sorted(prim)}"
                 )
 
+    # Radii must be positive: zero/negative radii divide by zero in the SDF
+    # math (ZeroDivisionError used to escape and orphan the entity).
+    if kind == "sphere":
+        if _nonpositive(prim.get("r")):
+            raise ValueError("sphere r must be a number > 0")
+    elif kind in ("ellipsoid", "box"):
+        r = prim.get("r")
+        if not (isinstance(r, (list, tuple)) and len(r) == 3) or any(_nonpositive(v) for v in r):
+            raise ValueError(f"{kind} r must be [rx,ry,rz] with all values > 0")
+    elif kind == "torus":
+        if _nonpositive(prim.get("R")) or _nonpositive(prim.get("r")):
+            raise ValueError("torus R and r must be numbers > 0")
+    elif kind == "cylinder":
+        if _nonpositive(prim.get("r")):
+            raise ValueError("cylinder r must be a number > 0")
+
+
+def _nonpositive(v: Any) -> bool:
+    try:
+        return float(v) <= 0.0
+    except (TypeError, ValueError):
+        return True
+
 
 def voxelize_primitives(world, primitives: List[Dict[str, Any]], layer: str,
                         eid: str) -> int:
@@ -201,7 +232,7 @@ def voxelize_primitives(world, primitives: List[Dict[str, Any]], layer: str,
         _validate_prim(prim)
         try:
             placed += _voxelize_prim(world, prim, layer, eid)
-        except (KeyError, TypeError, ValueError) as e:
+        except (KeyError, TypeError, ValueError, ArithmeticError) as e:
             raise ValueError(
                 f"bad primitive #{i + 1} ({prim.get('shape')}): {e}"
             )

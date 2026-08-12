@@ -15,10 +15,15 @@ import math
 import random
 from typing import Dict, List, Optional, Tuple
 
-from minepaint.core import W, H, D, Y_MIN, Y_MAX, PALETTE, Block
+from minepaint.core import W, H, D, Y_MIN, Y_MAX, PALETTE, Block, WorldError
 
 SEA_LEVEL_DEFAULT = 7
 SNOWLINE_DEFAULT = 38
+
+# Hard cap on random-placement attempts per scatter call. The placement loops
+# are unbounded-by-construction (each miss can cost up to 40 attempts), so an
+# impossible region + huge LLM-supplied count used to freeze the server.
+MAX_SCATTER_ATTEMPTS = 20_000
 
 # ------------------------------------------------------------ style presets
 # surface modes:
@@ -129,7 +134,11 @@ def generate(world, seed: int = 1, *, style: str = "snowy_mountains",
     that preset. Params are clamped (not rejected) — a clamped landscape
     beats a refused one. Writes into `world` in place (layer "terrain").
     """
-    preset = STYLES.get(style, STYLES["snowy_mountains"])
+    preset = STYLES.get(style)
+    if preset is None:
+        raise WorldError(
+            f"unknown terrain style {style!r}; valid styles: {', '.join(sorted(STYLES))}"
+        )
     surface_mode = preset["surface"]
     sea_level = preset["sea_level"] if sea_level is None else int(sea_level)
     snowline = preset["snowline"] if snowline is None else int(snowline)
@@ -249,6 +258,11 @@ def _build_road(world, x1: int, z1: int, x2: int, z2: int, width: int = 2,
                 block_type: str = "dirt", layer_id: Optional[str] = None) -> int:
     """Lay a height-following path from (x1,z1) to (x2,z2). Returns # placed."""
     cols = _column_cache(world)
+    # clamp endpoints to the world first: huge/negative corners previously
+    # ran the interpolation loop for billions of steps (a 1e9-wide road froze
+    # the server for ~16 minutes doing useless out-of-bounds work).
+    x1, x2 = sorted((max(0, min(W - 1, x1)), max(0, min(W - 1, x2))))
+    z1, z2 = sorted((max(0, min(D - 1, z1)), max(0, min(D - 1, z2))))
     steps = max(abs(x2 - x1), abs(z2 - z1)) or 1
     placed = 0
     for i in range(steps + 1):
@@ -282,7 +296,10 @@ def _scatter(world, block_type: str, count: int, x1: int, z1: int, x2: int, z2: 
     x1, x2 = sorted((max(0, x1), min(W - 1, x2)))
     z1, z2 = sorted((max(0, z1), min(D - 1, z2)))
     attempts = 0
-    while len(spots) < count and attempts < count * 40:
+    # hard cap on attempts: an impossible region (all underwater / wrong
+    # surface) previously burned count*40 attempts — unbounded when the LLM
+    # passes a huge count.
+    while len(spots) < count and attempts < min(count * 40, MAX_SCATTER_ATTEMPTS):
         attempts += 1
         x, z = rng.randint(x1, x2), rng.randint(z1, z2)
         top = cols.get((x, z))
@@ -335,7 +352,7 @@ def _scatter_trees(world, tree_type: str, count: int, x1: int, z1: int, x2: int,
     x1, x2 = sorted((max(0, x1), min(W - 1, x2)))
     z1, z2 = sorted((max(0, z1), min(D - 1, z2)))
     attempts = 0
-    while len(spots) < count and attempts < count * 40:
+    while len(spots) < count and attempts < min(count * 40, MAX_SCATTER_ATTEMPTS):
         attempts += 1
         x, z = rng.randint(x1, x2), rng.randint(z1, z2)
         top = cols.get((x, z))

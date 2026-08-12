@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -43,9 +44,9 @@ def load_world_from_disk() -> None:
         try:
             with open(_world_path) as f:
                 world.from_json(json.load(f))
-        except WorldError as e:
-            # e.g. a saved world from an older world-size build: don't crash,
-            # start fresh instead.
+        except (WorldError, ValueError, OSError, IndexError, KeyError, TypeError) as e:
+            # e.g. a saved world from an older world-size build, or a truncated
+            # file from a killed mid-write autosave: don't crash, start fresh.
             print(f"[minepaint] ignoring saved world ({e}); starting fresh", file=sys.stderr)
             world.reset()
 
@@ -55,11 +56,29 @@ def add_mutation_listener(fn: Callable[[], None]) -> None:
     _mutation_listeners.append(fn)
 
 
+# Autosave coalescing: bursts of fast LLM tool calls (an MCP loop can fire
+# several mutations per second) each re-serialize the whole world, which is
+# the dominant cost on big canvases. Skip the write when a save happened
+# < SAVE_DEBOUNCE_S ago; the next call past the window persists everything.
+SAVE_DEBOUNCE_S = 1.0
+_last_save_ts = 0.0
+
+
 def autosave() -> str:
+    global _last_save_ts
+    now = time.monotonic()
+    if now - _last_save_ts < SAVE_DEBOUNCE_S:
+        return str(_world_path)  # coalesce burst; next save writes full state
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    payload = world.to_json()
+    # atomic write: temp file + rename, so a kill mid-write can never leave a
+    # truncated world.json that bricks the next startup.
+    tmp = _world_path.with_suffix(_world_path.suffix + ".tmp")
     with _mutation_lock:
-        with open(_world_path, "w") as f:
-            json.dump(world.to_json(), f)
+        with open(tmp, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp, _world_path)
+    _last_save_ts = now
     return str(_world_path)
 
 
@@ -138,7 +157,7 @@ def place_block(
     Example: place_block(5, 0, 5, "grass", "house") -> {"placed":1,"at":[5,0,5],"type":"grass"}
     Valid palette types: """ + "; ".join(f"{k} ({v})" for k, v in sorted(PALETTE_DOC.items()))
     lid = _resolve_layer(layer_id)
-    eid = entity_id if isinstance(entity_id, str) else None
+    eid = _require_entity_id(entity_id)
     world.place_block(x, y, z, block_type, lid, eid)
     _after_mutation()
     return {"placed": 1, "at": [x, y, z], "type": block_type, "layer_id": lid, "entity_id": eid}
@@ -146,7 +165,7 @@ def place_block(
 
 @mcp.tool
 def delete_block(
-    x: int, y: int, z: int, layer_id: Any = None
+    x: int, y: int, z: int
 ) -> Dict[str, Any]:
     """Remove the block at (x, y, z) if present. No-op on empty air.
 
@@ -173,7 +192,7 @@ def fill_cuboid(
     with grass and returns {"placed":16,"cuboid":[[0,0,0],[3,0,3]],"type":"grass"}.
     """
     lid = _resolve_layer(layer_id)
-    eid = entity_id if isinstance(entity_id, str) else None
+    eid = _require_entity_id(entity_id)
     count = world.fill_cuboid(x1, y1, z1, x2, y2, z2, block_type, lid, eid)
     _after_mutation()
     return {
@@ -324,6 +343,31 @@ def delete_entity(entity_id: str) -> Dict[str, Any]:
     return {"entity_id": entity_id, "blocks_removed": removed}
 
 
+def _resolve_world_path(path: Optional[str]) -> Path:
+    """Resolve a user-supplied path and make sure it stays inside DATA_DIR.
+
+    The LLM drives these tools, so a stray absolute path or '..' escape must
+    never redirect the autosave target outside the project's data folder —
+    a bad tool call would otherwise overwrite arbitrary files (e.g.
+    ~/.hermes/.env or any other file the server user can write).
+    """
+    if path is None:
+        return DEFAULT_WORLD_PATH
+    if not isinstance(path, str) or not path.strip():
+        raise WorldError("path must be a non-empty string or None for the default")
+    p = Path(path).expanduser()
+    if not p.name.endswith(".json"):
+        raise WorldError(f"world files must end with .json (got {path!r})")
+    resolved = (DATA_DIR / p).resolve() if not p.is_absolute() else p.resolve()
+    data_dir = DATA_DIR.resolve()
+    if resolved != data_dir and data_dir not in resolved.parents:
+        raise WorldError(
+            f"path must stay inside {DATA_DIR} (got {path!r}) — save/load is "
+            f"restricted to the project's data folder."
+        )
+    return resolved
+
+
 @mcp.tool
 def save_world(path: Optional[str] = None) -> Dict[str, Any]:
     """Save the world to JSON. Default data/world.json.
@@ -331,7 +375,7 @@ def save_world(path: Optional[str] = None) -> Dict[str, Any]:
     Example: save_world() -> {"saved_to":"data/world.json","blocks":123,"layers":2,"entities":4}
     """
     if path is not None:
-        set_world_path(path)
+        set_world_path(_resolve_world_path(path))
     saved = autosave()
     return {
         "saved_to": saved,
@@ -347,11 +391,19 @@ def load_world(path: Optional[str] = None) -> Dict[str, Any]:
 
     Example: load_world() -> {"loaded_from":"data/world.json","blocks":123,"layers":2,"entities":4}
     """
-    if path is not None:
-        set_world_path(path)
-    load_world_from_disk()
+    target = _resolve_world_path(path) if path is not None else _world_path
+    if not target.exists():
+        raise WorldError(f"no world file at {target}")
+    try:
+        with open(target) as f:
+            world.from_json(json.load(f))
+    except (WorldError, ValueError, OSError, IndexError, KeyError, TypeError) as e:
+        raise WorldError(f"failed to load world from {target}: {e}")
+    # redirect the autosave target ONLY after a successful load, so a failed
+    # load can never make the next mutation overwrite the requested file.
+    set_world_path(target)
     return {
-        "loaded_from": str(_world_path),
+        "loaded_from": str(target),
         "blocks": world.block_count,
         "layers": len(world.layers),
         "entities": len(world.entities),
@@ -399,6 +451,28 @@ def generate_terrain(
     return summary
 
 
+def _clamp_count(count: Any) -> int:
+    """Scatter counts must be sane ints; clamp instead of refusing (the LLM
+    often guesses big numbers). Max 2000 keeps the placement loop bounded."""
+    if isinstance(count, bool) or not isinstance(count, int):
+        raise WorldError(f"count must be an integer, got {count!r}")
+    return min(max(count, 0), 2000)
+
+
+def _require_entity_id(entity_id: Any) -> Optional[str]:
+    """entity_id must be a string (or None).
+
+    Silently dropping non-string ids (the old behavior) made the LLM believe
+    blocks joined an entity when they didn't — fail loud instead.
+    """
+    if entity_id is None:
+        return None
+    if not isinstance(entity_id, str):
+        raise WorldError(f"entity_id must be a string or null, got {entity_id!r}")
+    world._require_entity(entity_id)
+    return entity_id
+
+
 def _resolve_layer(layer_id: Any) -> str:
     """Layer id if usable, else the lowest-order existing layer. Missing named
     layers are auto-created (LLMs often invent layer names — be forgiving)."""
@@ -427,11 +501,14 @@ def get_heights(x1: int, z1: int, x2: int, z2: int) -> Dict[str, Any]:
     """
     from minepaint.terrain import _column_cache
 
+    # clamp corners to the world FIRST so reversed/huge regions can't bypass
+    # the size cap (e.g. (95,0,0,95) previously produced a negative product
+    # and slipped through as a 96x96 map).
+    x1, x2 = sorted((max(0, min(W - 1, x1)), max(0, min(W - 1, x2))))
+    z1, z2 = sorted((max(0, min(D - 1, z1)), max(0, min(D - 1, z2))))
     if (x2 - x1 + 1) * (z2 - z1 + 1) > 576:
         raise WorldError("region too large (max 24x24 cells); query in chunks")
     cols = _column_cache(world)
-    x1, x2 = sorted((max(0, x1), min(W - 1, x2)))
-    z1, z2 = sorted((max(0, z1), min(D - 1, z2)))
     hm, sm = [], []
     for x in range(x1, x2 + 1):
         rh, rs = [], []
@@ -479,6 +556,9 @@ def scatter_blocks(block_type: str, count: int, x1: int = 0, z1: int = 0,
     from minepaint.terrain import _scatter
 
     world._require_type(block_type)
+    # clamp count: unbounded counts make the placement loop spin for hours on
+    # small/unsuitable regions (each miss costs up to 40 attempts).
+    count = _clamp_count(count)
     allow = {"grass", "dirt", "sand"} if block_type == "cactus" \
         else {"grass", "dirt", "sand", "stone"}
     lid = _resolve_layer(layer_id)
@@ -502,6 +582,7 @@ def scatter_trees(tree_type: str = "pine", count: int = 5, x1: int = 0, z1: int 
 
     if tree_type not in ("pine", "oak"):
         raise WorldError("tree_type must be 'pine' or 'oak'")
+    count = _clamp_count(count)
     lid = _resolve_layer(layer_id)
     total, ids = _scatter_trees(world, tree_type, count, x1, z1, x2, z2, lid)
     _after_mutation()
@@ -546,7 +627,7 @@ def build_object(kind: str, params: Dict[str, Any], layer_id: Any = None,
     eid = world.create_entity(name)
     try:
         placed = build_named_object(world, kind, params, lid, eid)
-    except ValueError as e:
+    except (ValueError, ArithmeticError, KeyError, TypeError) as e:
         world.delete_entity(eid)
         raise WorldError(str(e))
     _after_mutation()
@@ -578,7 +659,7 @@ def build_shape(primitives: List[Dict[str, Any]], layer_id: Any = None,
         raise WorldError("primitives must be a non-empty JSON array")
     try:
         placed = voxelize_primitives(world, primitives, lid, eid)
-    except ValueError as e:
+    except (ValueError, ArithmeticError, KeyError, TypeError) as e:
         world.delete_entity(eid)
         raise WorldError(str(e))
     _after_mutation()

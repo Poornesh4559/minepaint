@@ -195,6 +195,112 @@ async def main() -> int:
             ents = await call(session, "list_entities")
             check("object entities listed", len(ents) >= 2, str(len(ents)))
 
+            # ---- edge cases: malformed LLM input must fail fast & loudly ----
+            # (each of these used to hang the server, destroy terrain, steal
+            # entity blocks, or write arbitrary files)
+            await call(session, "reset_world")
+            t = await call(session, "create_layer", name="t")
+
+            # zero-offset / self-overlapping copy must error, not steal blocks
+            slab = await call(session, "create_entity", name="slab")
+            await call(session, "fill_cuboid", x1=50, y1=0, z1=50, x2=51, y2=0, z2=50,
+                        block_type="stone", layer_id=t, entity_id=slab)
+            for label, kw in (("zero offset", dict(dx=0, dy=0, dz=0)),
+                              ("overlapping offset", dict(dx=1, dy=0, dz=0))):
+                try:
+                    await call(session, "copy_entity", entity_id=slab, **kw)
+                    check(f"copy_entity {label} raises error", False, "no error raised")
+                except RuntimeError as ex:
+                    check(f"copy_entity {label} raises error", "overlap" in str(ex).lower(), str(ex)[:90])
+            sb = await call(session, "get_entity", entity_id=slab)
+            check("slab keeps all blocks after rejected copies", len(sb["blocks"]) == 2, str(len(sb["blocks"])))
+
+            # copy volume cap: 4443-block giant tree x 1000 copies must error fast
+            big = await call(session, "build_object", kind="giant_tree",
+                             params={"position": [48, 10, 48], "height": 30,
+                                     "trunk_r": 4, "canopy_r": 9})
+            try:
+                await call(session, "copy_entity", entity_id=big["entity"], dx=3, dy=0, dz=0, copies=1000)
+                check("huge copy_entity volume raises error", False, "no error raised")
+            except RuntimeError as ex:
+                check("huge copy_entity volume raises error", "250000" in str(ex), str(ex)[:90])
+
+            # move onto an occupied cell must error and move nothing
+            a = await call(session, "create_entity", name="a")
+            b = await call(session, "create_entity", name="b")
+            await call(session, "place_block", x=5, y=0, z=5, block_type="stone", layer_id=t, entity_id=a)
+            await call(session, "place_block", x=6, y=0, z=5, block_type="stone", layer_id=t, entity_id=b)
+            try:
+                await call(session, "move_entity", entity_id=a, dx=1, dy=0, dz=0)
+                check("move_entity onto occupied cell raises error", False, "no error raised")
+            except RuntimeError as ex:
+                check("move_entity onto occupied cell raises error", "overwrite" in str(ex).lower(), str(ex)[:90])
+            ga = await call(session, "get_entity", entity_id=a)
+            check("block a unmoved after rejected move", (5, 0, 5) in {(x[0], x[1], x[2]) for x in ga["blocks"]})
+
+            # unbounded counts/corners must clamp, not hang
+            s1 = await call(session, "scatter_blocks", block_type="cactus", count=10**9,
+                            x1=0, z1=0, x2=5, z2=5)
+            check("scatter_blocks huge count returns quickly (clamped)", isinstance(s1.get("placed"), int), str(s1)[:80])
+            s2 = await call(session, "scatter_trees", tree_type="pine", count=10**9)
+            check("scatter_trees huge count returns quickly (clamped)", isinstance(s2.get("trees"), int), str(s2)[:80])
+            road = await call(session, "build_road", x1=0, z1=0, x2=10**9, z2=10**9)
+            check("build_road huge coords returns quickly (clamped)", isinstance(road.get("placed"), int), str(road)[:80])
+
+            # get_heights cap bypass with reversed corners must error
+            try:
+                await call(session, "get_heights", x1=95, z1=0, x2=0, z2=95)
+                check("get_heights reversed huge region raises error", False, "no error raised")
+            except RuntimeError as ex:
+                check("get_heights reversed huge region raises error", "too large" in str(ex).lower(), str(ex)[:80])
+
+            # unknown terrain style must error, not silently fall back
+            try:
+                await call(session, "generate_terrain", style="bogus")
+                check("unknown terrain style raises error", False, "no error raised")
+            except RuntimeError as ex:
+                check("unknown terrain style raises error", "bogus" in str(ex), str(ex)[:90])
+
+            # non-string entity_id must error, not silently drop
+            try:
+                await call(session, "place_block", x=1, y=0, z=1, block_type="stone",
+                           layer_id=t, entity_id=123)
+                check("non-string entity_id raises error", False, "no error raised")
+            except RuntimeError as ex:
+                check("non-string entity_id raises error", "entity_id" in str(ex), str(ex)[:90])
+
+            # oversized build_shape must fail BEFORE destroying terrain
+            before = (await call(session, "get_state"))["blocks"]
+            try:
+                await call(session, "build_shape", primitives=[
+                    {"shape": "sphere", "center": [48, 10, 48], "r": 100, "m": "stone"}])
+                check("oversized build_shape raises error", False, "no error raised")
+            except RuntimeError as ex:
+                check("oversized build_shape raises error", "exceeds" in str(ex).lower(), str(ex)[:90])
+            after = (await call(session, "get_state"))["blocks"]
+            check("terrain intact after failed build_shape",
+                  len(after) == len(before), f"{len(before)} -> {len(after)}")
+
+            # degenerate shape (zero radius) must error cleanly (was ZeroDivisionError)
+            try:
+                await call(session, "build_shape", primitives=[
+                    {"shape": "ellipsoid", "center": [48, 10, 48], "r": [0, 5, 5], "m": "stone"}])
+                check("zero-radius shape raises error", False, "no error raised")
+            except RuntimeError as ex:
+                check("zero-radius shape raises error", "> 0" in str(ex), str(ex)[:90])
+
+            # save/load path escape must error (no arbitrary file writes)
+            try:
+                await call(session, "save_world", path="/tmp/minepaint_escape_test.json")
+                check("save_world path escape raises error", False, "no error raised")
+            except RuntimeError as ex:
+                check("save_world path escape raises error", "inside" in str(ex).lower(), str(ex)[:90])
+            try:
+                await call(session, "load_world", path="../../evil.json")
+                check("load_world path escape raises error", False, "no error raised")
+            except RuntimeError as ex:
+                check("load_world path escape raises error", "inside" in str(ex).lower(), str(ex)[:90])
+
     print()
     if failures:
         print(f"RESULT: {len(failures)} FAILED")

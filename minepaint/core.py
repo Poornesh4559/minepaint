@@ -8,10 +8,16 @@ Pure, deterministic, no I/O. A Minecraft-styled 3D voxel world:
 
 Everything that can go wrong raises a subclass of WorldError with a clear,
 LLM-friendly message.
+
+Thread-safety: the web server serializes/reads the world on the event loop
+while FastMCP runs tool functions on worker threads, so every public method
+that touches the mutable dicts takes the same re-entrant lock. Snapshotting
+(to_json / blocks) is consistent under the lock.
 """
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -21,6 +27,11 @@ WORLD_SIZE = (96, 96, 96)
 W, H, D = WORLD_SIZE
 Y_MIN = -32
 Y_MAX = Y_MIN + H - 1
+
+# Safety cap: total blocks a single copy_entity call may create. Matches the
+# shape voxelizer's MAX_BLOCKS_PER_CALL so an LLM can't OOM the server by
+# copying a giant entity 1000x.
+MAX_COPY_BLOCKS = 250_000
 
 
 class WorldError(Exception):
@@ -143,6 +154,9 @@ class World:
         self.layers: Dict[str, Layer] = {}
         self.entities: Dict[str, Entity] = {}
         self._next_layer_order = 0
+        # Re-entrant so nested public calls (e.g. copy_entity -> entity_blocks)
+        # work while the outer call holds the lock.
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------------ ids
     def _unique_layer_id(self, name: str) -> str:
@@ -198,7 +212,8 @@ class World:
 
     # --------------------------------------------------------------- blocks
     def block_at(self, x: int, y: int, z: int) -> Optional[Block]:
-        return self._blocks.get((x, y, z))
+        with self._lock:
+            return self._blocks.get((x, y, z))
 
     def place_block(
         self, x: int, y: int, z: int, block_type: str, layer_id: str,
@@ -207,13 +222,15 @@ class World:
         """Place one block, overwriting anything already at that cell."""
         self._validate_place(x, y, z, block_type, layer_id, entity_id)
         block = Block(x=x, y=y, z=z, type=block_type, layer_id=layer_id, entity_id=entity_id)
-        self._blocks[block.key()] = block
+        with self._lock:
+            self._blocks[block.key()] = block
         return block
 
     def delete_block(self, x: int, y: int, z: int) -> Optional[Block]:
         x, y, z = _check_bounds_int(x, "x"), _check_bounds_int(y, "y"), _check_bounds_int(z, "z")
         check_bounds(x, y, z)
-        return self._blocks.pop((x, y, z), None)
+        with self._lock:
+            return self._blocks.pop((x, y, z), None)
 
     def fill_cuboid(
         self, x1: int, y1: int, z1: int, x2: int, y2: int, z2: int,
@@ -239,26 +256,31 @@ class World:
         if entity_id is not None:
             self._require_entity(entity_id)
         count = 0
-        for x in range(lo_x, hi_x + 1):
-            for y in range(lo_y, hi_y + 1):
-                for z in range(lo_z, hi_z + 1):
-                    self._blocks[(x, y, z)] = Block(x, y, z, block_type, layer_id, entity_id)
-                    count += 1
+        with self._lock:
+            for x in range(lo_x, hi_x + 1):
+                for y in range(lo_y, hi_y + 1):
+                    for z in range(lo_z, hi_z + 1):
+                        self._blocks[(x, y, z)] = Block(x, y, z, block_type, layer_id, entity_id)
+                        count += 1
         return count
 
     def blocks_in_layer(self, layer_id: str) -> List[Block]:
-        return [b for b in self._blocks.values() if b.layer_id == layer_id]
+        with self._lock:
+            return [b for b in self._blocks.values() if b.layer_id == layer_id]
 
     def entity_blocks(self, entity_id: str) -> List[Block]:
         self._require_entity(entity_id)
-        return [b for b in self._blocks.values() if b.entity_id == entity_id]
+        with self._lock:
+            return [b for b in self._blocks.values() if b.entity_id == entity_id]
 
     def blocks_by_type(self, block_type: str) -> List[Block]:
-        return [b for b in self._blocks.values() if b.type == block_type]
+        with self._lock:
+            return [b for b in self._blocks.values() if b.type == block_type]
 
     @property
     def blocks(self) -> List[Block]:
-        return sorted(self._blocks.values(), key=lambda b: (b.x, b.y, b.z))
+        with self._lock:
+            return sorted(self._blocks.values(), key=lambda b: (b.x, b.y, b.z))
 
     @property
     def block_count(self) -> int:
@@ -268,30 +290,35 @@ class World:
     def create_layer(self, name: str) -> str:
         if not isinstance(name, str) or not name.strip():
             raise WorldError("Layer name must be a non-empty string.")
-        lid = self._unique_layer_id(name)
-        self.layers[lid] = Layer(id=lid, name=name, visible=True, order=self._next_layer_order)
-        self._next_layer_order += 1
+        with self._lock:
+            lid = self._unique_layer_id(name)
+            self.layers[lid] = Layer(id=lid, name=name, visible=True, order=self._next_layer_order)
+            self._next_layer_order += 1
         return lid
 
     def delete_layer(self, layer_id: str) -> int:
         self._require_layer(layer_id)
-        removed = len(self.blocks_in_layer(layer_id))
-        self._blocks = {k: b for k, b in self._blocks.items() if b.layer_id != layer_id}
-        del self.layers[layer_id]
+        with self._lock:
+            removed = len(self.blocks_in_layer(layer_id))
+            self._blocks = {k: b for k, b in self._blocks.items() if b.layer_id != layer_id}
+            del self.layers[layer_id]
         return removed
 
     def set_layer_visible(self, layer_id: str, visible: bool) -> None:
-        self._require_layer(layer_id).visible = bool(visible)
+        with self._lock:
+            self._require_layer(layer_id).visible = bool(visible)
 
     def layers_sorted(self) -> List[Layer]:
-        return sorted(self.layers.values(), key=lambda l: (l.order, l.id))
+        with self._lock:
+            return sorted(self.layers.values(), key=lambda l: (l.order, l.id))
 
     # ------------------------------------------------------------- entities
     def create_entity(self, name: str) -> str:
         if not isinstance(name, str) or not name.strip():
             raise WorldError("Entity name must be a non-empty string.")
-        eid = self._unique_entity_id(name)
-        self.entities[eid] = Entity(id=eid, name=name)
+        with self._lock:
+            eid = self._unique_entity_id(name)
+            self.entities[eid] = Entity(id=eid, name=name)
         return eid
 
     def copy_entity(
@@ -309,76 +336,109 @@ class World:
         target_layer = layer_id if layer_id is not None else None
         if layer_id is not None:
             self._require_layer(layer_id)
-        source = self.entity_blocks(entity_id)
-        if not source:
-            raise WorldError(f"Entity {entity_id!r} has no blocks to copy.")
-        # validate every target cell BEFORE mutating (atomicity)
-        targets: List[List[Tuple[int, int, int]]] = []
-        for i in range(1, copies + 1):
-            cell_list = []
-            for b in source:
-                nx, ny, nz = b.x + dx * i, b.y + dy * i, b.z + dz * i
-                check_bounds(nx, ny, nz)
-                cell_list.append((nx, ny, nz))
-            targets.append(cell_list)
-        new_ids: List[str] = []
-        for i, cell_list in enumerate(targets, start=1):
-            nid = self._unique_entity_id(f"{entity.name}_copy{i}")
-            new_entity = Entity(id=nid, name=f"{entity.name}_copy{i}")
-            self.entities[nid] = new_entity
-            for b, (nx, ny, nz) in zip(source, cell_list):
-                self._blocks[(nx, ny, nz)] = Block(
-                    nx, ny, nz, b.type, b.layer_id if target_layer is None else target_layer, nid
+        with self._lock:
+            source = self.entity_blocks(entity_id)
+            if not source:
+                raise WorldError(f"Entity {entity_id!r} has no blocks to copy.")
+            total_blocks = len(source) * copies
+            if total_blocks > MAX_COPY_BLOCKS:
+                raise WorldError(
+                    f"copy would create {total_blocks} blocks (entity {entity_id!r} has "
+                    f"{len(source)} blocks x {copies} copies); max {MAX_COPY_BLOCKS} per "
+                    f"call — copy in smaller batches."
                 )
-            new_ids.append(nid)
-        return new_ids
+            # validate every target cell BEFORE mutating (atomicity), and reject
+            # offsets that land on the source or an earlier copy (that would
+            # silently steal blocks between entities).
+            used: set = set()
+            for b in source:
+                used.add(b.key())
+            targets: List[List[Tuple[int, int, int]]] = []
+            for i in range(1, copies + 1):
+                cell_list = []
+                for b in source:
+                    nx, ny, nz = b.x + dx * i, b.y + dy * i, b.z + dz * i
+                    check_bounds(nx, ny, nz)
+                    if (nx, ny, nz) in used:
+                        raise WorldError(
+                            f"copy offset ({dx},{dy},{dz}) overlaps the source entity's own "
+                            f"blocks or an earlier copy — nothing copied. Choose a larger "
+                            f"offset so copies don't collide."
+                        )
+                    cell_list.append((nx, ny, nz))
+                used.update(cell_list)
+                targets.append(cell_list)
+            new_ids: List[str] = []
+            for i, cell_list in enumerate(targets, start=1):
+                nid = self._unique_entity_id(f"{entity.name}_copy{i}")
+                new_entity = Entity(id=nid, name=f"{entity.name}_copy{i}")
+                self.entities[nid] = new_entity
+                for b, (nx, ny, nz) in zip(source, cell_list):
+                    self._blocks[(nx, ny, nz)] = Block(
+                        nx, ny, nz, b.type, b.layer_id if target_layer is None else target_layer, nid
+                    )
+                new_ids.append(nid)
+            return new_ids
 
     def move_entity(self, entity_id: str, dx: int, dy: int, dz: int) -> int:
         entity = self._require_entity(entity_id)
         for v, name in ((dx, "dx"), (dy, "dy"), (dz, "dz")):
             _check_bounds_int(v, name)
-        source = self.entity_blocks(entity_id)
-        if not source:
-            return 0
-        moved: List[Tuple[Block, Tuple[int, int, int]]] = []
-        for b in source:
-            nx, ny, nz = b.x + dx, b.y + dy, b.z + dz
-            check_bounds(nx, ny, nz)
-            moved.append((b, (nx, ny, nz)))
-        for b, (nx, ny, nz) in moved:
-            del self._blocks[b.key()]
-            b.x, b.y, b.z = nx, ny, nz
-            self._blocks[(nx, ny, nz)] = b
-        return len(moved)
+        with self._lock:
+            source = self.entity_blocks(entity_id)
+            if not source:
+                return 0
+            moved: List[Tuple[Block, Tuple[int, int, int]]] = []
+            conflicts = 0
+            for b in source:
+                nx, ny, nz = b.x + dx, b.y + dy, b.z + dz
+                check_bounds(nx, ny, nz)
+                occupant = self._blocks.get((nx, ny, nz))
+                if occupant is not None and occupant is not b:
+                    conflicts += 1
+                moved.append((b, (nx, ny, nz)))
+            if conflicts:
+                raise WorldError(
+                    f"move would overwrite {conflicts} existing block(s) — nothing moved. "
+                    f"Use a larger offset, or delete/move the blocking blocks first."
+                )
+            for b, (nx, ny, nz) in moved:
+                del self._blocks[b.key()]
+                b.x, b.y, b.z = nx, ny, nz
+                self._blocks[(nx, ny, nz)] = b
+            return len(moved)
 
     def delete_entity(self, entity_id: str) -> int:
         self._require_entity(entity_id)
-        removed = len(self.entity_blocks(entity_id))
-        self._blocks = {k: b for k, b in self._blocks.items() if b.entity_id != entity_id}
-        del self.entities[entity_id]
+        with self._lock:
+            removed = len(self.entity_blocks(entity_id))
+            self._blocks = {k: b for k, b in self._blocks.items() if b.entity_id != entity_id}
+            del self.entities[entity_id]
         return removed
 
     # ------------------------------------------------------------- resetting
     def reset(self) -> None:
-        self._blocks.clear()
-        self.layers.clear()
-        self.entities.clear()
-        self._next_layer_order = 0
+        with self._lock:
+            self._blocks.clear()
+            self.layers.clear()
+            self.entities.clear()
+            self._next_layer_order = 0
 
     # ------------------------------------------------------------ serializing
     def to_json(self) -> Dict[str, Any]:
-        return {
-            "size": list(self.size),
-            "y_min": Y_MIN,
-            "layers": [
-                {"id": l.id, "name": l.name, "visible": l.visible, "order": l.order}
-                for l in self.layers_sorted()
-            ],
-            "blocks": [
-                [b.x, b.y, b.z, b.type, b.layer_id, b.entity_id] for b in self.blocks
-            ],
-            "entities": [{"id": e.id, "name": e.name} for e in self.entities.values()],
-        }
+        with self._lock:
+            return {
+                "size": list(self.size),
+                "y_min": Y_MIN,
+                "layers": [
+                    {"id": l.id, "name": l.name, "visible": l.visible, "order": l.order}
+                    for l in self.layers_sorted()
+                ],
+                "blocks": [
+                    [b.x, b.y, b.z, b.type, b.layer_id, b.entity_id] for b in self.blocks
+                ],
+                "entities": [{"id": e.id, "name": e.name} for e in self.entities.values()],
+            }
 
     def from_json(self, data: Dict[str, Any]) -> None:
         """Populate THIS world from a to_json() dict (in place).
@@ -390,20 +450,21 @@ class World:
             raise WorldError(
                 f"World file has size {data['size']} but this build only supports {WORLD_SIZE}."
             )
-        self._blocks.clear()
-        self.layers.clear()
-        self.entities.clear()
-        self._next_layer_order = 0
-        for l in data.get("layers", []):
-            self.layers[l["id"]] = Layer(
-                id=l["id"], name=l.get("name", l["id"]),
-                visible=bool(l.get("visible", True)), order=int(l.get("order", 0)),
-            )
-            self._next_layer_order = max(self._next_layer_order, int(l.get("order", 0)) + 1)
-        for e in data.get("entities", []):
-            self.entities[e["id"]] = Entity(id=e["id"], name=e.get("name", e["id"]))
-        for row in data.get("blocks", []):
-            x, y, z, block_type, layer_id = row[0], row[1], row[2], row[3], row[4]
-            entity_id = row[5] if len(row) > 5 else None
-            self._validate_place(x, y, z, block_type, layer_id, entity_id)
-            self._blocks[(x, y, z)] = Block(x, y, z, block_type, layer_id, entity_id)
+        with self._lock:
+            self._blocks.clear()
+            self.layers.clear()
+            self.entities.clear()
+            self._next_layer_order = 0
+            for l in data.get("layers", []):
+                self.layers[l["id"]] = Layer(
+                    id=l["id"], name=l.get("name", l["id"]),
+                    visible=bool(l.get("visible", True)), order=int(l.get("order", 0)),
+                )
+                self._next_layer_order = max(self._next_layer_order, int(l.get("order", 0)) + 1)
+            for e in data.get("entities", []):
+                self.entities[e["id"]] = Entity(id=e["id"], name=e.get("name", e["id"]))
+            for row in data.get("blocks", []):
+                x, y, z, block_type, layer_id = row[0], row[1], row[2], row[3], row[4]
+                entity_id = row[5] if len(row) > 5 else None
+                self._validate_place(x, y, z, block_type, layer_id, entity_id)
+                self._blocks[(x, y, z)] = Block(x, y, z, block_type, layer_id, entity_id)
