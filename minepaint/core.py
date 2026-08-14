@@ -145,6 +145,59 @@ class Entity:
     name: str
 
 
+# Vanilla-Minecraft block names LLMs commonly invent; mapped to the closest
+# palette equivalent so a stray 'iron_block' builds instead of failing.
+BLOCK_ALIASES = {
+    "iron_block": "stone",
+    "iron": "stone",
+    "smooth_stone": "stone",
+    "stone_bricks": "cobblestone",
+    "stonebrick": "cobblestone",
+    "cobbled_deepslate": "cobblestone",
+    "deepslate": "stone",
+    "planks": "oak_planks",
+    "oak_wood": "oak_log",
+    "wood": "oak_planks",
+    "white_wool": "snow",
+    "black_wool": "stone",
+    "gray_wool": "stone",
+    "grey_wool": "stone",
+    "orange_wool": "brick",
+    "yellow_wool": "sand",
+    "red_wool": "brick",
+    "blue_wool": "water",
+    "green_wool": "grass",
+    "brown_wool": "dirt",
+    "wool": "oak_planks",
+    "concrete": "stone",
+    "white_concrete": "snow",
+    "sandstone": "sand",
+    "gold_block": "gold_ore",
+    "diamond_block": "diamond_ore",
+    "glass_pane": "glass",
+    "ice": "glass",
+    "obsidian": "bedrock",
+    "redstone_block": "netherrack",
+    "nether_bricks": "netherrack",
+    "gravel": "stone",
+    "clay": "dirt",
+}
+
+
+def resolve_block_type(block_type: str) -> str:
+    """Return the palette block for a user/LLM-supplied name, applying
+    vanilla-Minecraft aliases. Unknown names raise UnknownBlockTypeError."""
+    if block_type in PALETTE:
+        return block_type
+    alias = BLOCK_ALIASES.get(block_type)
+    if alias is not None:
+        return alias
+    raise UnknownBlockTypeError(
+        f"Unknown block type {block_type!r}. Allowed types "
+        f"(with descriptions): {PALETTE_DOC}."
+    )
+
+
 class World:
     """96 x 96 x 96 voxel grid (y from -32 to 63) with layers and entities."""
 
@@ -192,23 +245,20 @@ class World:
             )
         return entity
 
-    def _require_type(self, block_type: str) -> None:
-        if block_type not in PALETTE:
-            raise UnknownBlockTypeError(
-                f"Unknown block type {block_type!r}. Allowed types "
-                f"(with descriptions): {PALETTE_DOC}."
-            )
+    def _require_type(self, block_type: str) -> str:
+        return resolve_block_type(block_type)
 
     def _validate_place(
         self, x: int, y: int, z: int, block_type: str, layer_id: str,
         entity_id: Optional[str] = None,
-    ) -> None:
+    ) -> str:
         x, y, z = _check_bounds_int(x, "x"), _check_bounds_int(y, "y"), _check_bounds_int(z, "z")
         check_bounds(x, y, z)
         self._require_type(block_type)
         self._require_layer(layer_id)
         if entity_id is not None:
             self._require_entity(entity_id)
+        return self._require_type(block_type)
 
     # --------------------------------------------------------------- blocks
     def block_at(self, x: int, y: int, z: int) -> Optional[Block]:
@@ -220,7 +270,7 @@ class World:
         entity_id: Optional[str] = None,
     ) -> Block:
         """Place one block, overwriting anything already at that cell."""
-        self._validate_place(x, y, z, block_type, layer_id, entity_id)
+        block_type = self._validate_place(x, y, z, block_type, layer_id, entity_id)
         block = Block(x=x, y=y, z=z, type=block_type, layer_id=layer_id, entity_id=entity_id)
         with self._lock:
             self._blocks[block.key()] = block
@@ -251,7 +301,7 @@ class World:
         for z in (lo_z, hi_z):
             if not 0 <= z < D:
                 raise _bounds_error(lo_x, lo_y, z)
-        self._require_type(block_type)
+        block_type = self._require_type(block_type)
         self._require_layer(layer_id)
         if entity_id is not None:
             self._require_entity(entity_id)
