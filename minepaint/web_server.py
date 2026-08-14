@@ -335,10 +335,17 @@ async def run_llm_plan(prompt: str) -> Dict[str, Any]:
     state = {"terrain_done": False}
     results = await _execute_calls(calls, state)
 
-    # one corrective round: send failures back so the LLM can fix its plan
+    # one corrective round: send failures back so the LLM can fix its plan.
+    # No cap on HOW MANY calls may have failed — a big batch of bad calls is
+    # exactly when correction is needed most (the old <=6 cap silently let
+    # 33 failed fill_cuboid calls through with zero retry). Cap the feedback
+    # text instead, so the retry prompt stays bounded.
     failed = [r for r in results if not r["ok"]]
-    if failed and len(failed) <= 6:
-        feedback = "\n".join(f"- {r['tool']} failed: {str(r['result'])[:200]}" for r in failed)
+    if failed:
+        shown = failed[:10]
+        feedback = "\n".join(f"- {r['tool']} failed: {str(r['result'])[:200]}" for r in shown)
+        if len(failed) > len(shown):
+            feedback += f"\n- ... and {len(failed) - len(shown)} more failures (same root cause)."
         try:
             retry_text = await _call_opencode(
                 system,
