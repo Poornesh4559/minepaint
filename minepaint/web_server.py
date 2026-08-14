@@ -30,6 +30,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import HTMLResponse
 from starlette.websockets import WebSocketState
 
+from minepaint.core import BLOCK_ALIASES, PALETTE
 from minepaint.mcp_server import (
     add_mutation_listener,
     execute_tool_call,
@@ -260,6 +261,33 @@ async def _execute_calls(calls: List[Dict[str, Any]], state: Optional[Dict[str, 
     return results
 
 
+def _wrap_user_prompt(prompt: str) -> str:
+    """Wrap the user's request with the painter's capabilities and hard
+    limitations, so the LLM plans within them instead of inventing block
+    types or impossible geometry (the recurring failure mode)."""
+    palette_list = ", ".join(sorted(PALETTE))
+    aliases = ", ".join(f"{k}->{v}" for k, v in sorted(BLOCK_ALIASES.items()))
+    return (
+        f"SCENE REQUEST (user): {prompt}\n\n"
+        "CAPABILITIES — you may ONLY call these tools: generate_terrain, "
+        "create_layer, delete_layer, place_block, fill_cuboid, delete_block, "
+        "build_road, scatter_blocks, scatter_trees, get_heights, build_object, "
+        "build_shape, copy_entity, move_entity, delete_entity, world_info.\n"
+        f"BLOCK PALETTE (18 total, EXACT names): {palette_list}.\n"
+        "Common Minecraft names are auto-mapped to the closest palette block:\n"
+        f"{aliases}.\n"
+        "LIMITATIONS:\n"
+        "- World is 96x96 cells (x,z in [0,95]), y in [-32,63]. Ground is near y=0.\n"
+        "- No colors, no dyes, no custom textures: only the palette above.\n"
+        "- A single fill_cuboid/build_shape call may create at most 250k blocks; "
+        "scatter counts are clamped to 2000 per call — split big builds into "
+        "several calls.\n"
+        "- copy_entity/move_entity refuse offsets that overlap existing blocks.\n"
+        "- Layer and entity ids are strings; create them before referencing.\n"
+        "Plan the scene with the palette and limits above in mind.\n"
+    )
+
+
 async def run_llm_plan(prompt: str) -> Dict[str, Any]:
     ctx = await world_summary_for_llm()
     system = (
@@ -309,7 +337,7 @@ async def run_llm_plan(prompt: str) -> Dict[str, Any]:
         '{"tool":"scatter_blocks","args":{"block_type":"cactus","count":8,"x1":0,"z1":0,"x2":95,"z2":95}}]\n'
         f"Current state:\n{ctx}"
     )
-    text = await _call_opencode(system, f"Paint this scene: {prompt}")
+    text = await _call_opencode(system, _wrap_user_prompt(prompt))
     try:
         calls = _parse_tool_calls(text)
     except Exception as e:
@@ -321,7 +349,7 @@ async def run_llm_plan(prompt: str) -> Dict[str, Any]:
                 "You have no real tools — ignore that. Reply with ONLY a JSON "
                 "array of tool calls chosen from the painter's tool list. "
                 "No prose, no markdown fences.",
-                f"Paint this scene: {prompt}\n\nYour previous reply was not valid "
+                f"{_wrap_user_prompt(prompt)}\n\nYour previous reply was not valid "
                 f"JSON:\n{text[:400]}",
             )
             calls = _parse_tool_calls(text2)
@@ -349,7 +377,7 @@ async def run_llm_plan(prompt: str) -> Dict[str, Any]:
         try:
             retry_text = await _call_opencode(
                 system,
-                f"Paint this scene: {prompt}\n\nYour previous plan had failing calls:\n"
+                f"{_wrap_user_prompt(prompt)}\n\nYour previous plan had failing calls:\n"
                 f"{feedback}\nFix ONLY those calls (keep the successful ones). "
                 "Return ONLY the JSON array of corrected tool calls.",
             )
